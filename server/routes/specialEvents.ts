@@ -218,6 +218,9 @@ export const prepareSpecialEventPayment: RequestHandler = async (req, res) => {
       if (racedAttempt?.status === "redirected" && racedAttempt.payment_url) {
         return res.json({ paymentUrl: racedAttempt.payment_url, txRef: racedAttempt.tx_ref, bookingId: booking.id });
       }
+      if (racedAttempt?.status === "initiated" || racedAttempt?.status === "verified") {
+        throw new SpecialEventPaymentError("Secure checkout is already being prepared. Try again shortly.", 409);
+      }
       throw error;
     }
     const response = await fetch(`${flutterwaveBaseUrl}/payments`, {

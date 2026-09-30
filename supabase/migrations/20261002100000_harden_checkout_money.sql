@@ -89,8 +89,18 @@ alter table public.menu_orders
   check (
     pricing_version <> 1 or (
       public.checkout_currency_minor_units(currency) is not null
+      and subtotal::text not in ('NaN', 'Infinity', '-Infinity')
+      and tax_amount::text not in ('NaN', 'Infinity', '-Infinity')
+      and service_fee::text not in ('NaN', 'Infinity', '-Infinity')
+      and tip_amount::text not in ('NaN', 'Infinity', '-Infinity')
+      and total_amount::text not in ('NaN', 'Infinity', '-Infinity')
       and subtotal >= 0 and tax_amount >= 0 and service_fee >= 0 and tip_amount >= 0
       and points_discount = 0
+      and subtotal = round(subtotal, public.checkout_currency_minor_units(currency))
+      and tax_amount = round(tax_amount, public.checkout_currency_minor_units(currency))
+      and service_fee = round(service_fee, public.checkout_currency_minor_units(currency))
+      and tip_amount = round(tip_amount, public.checkout_currency_minor_units(currency))
+      and total_amount = round(total_amount, public.checkout_currency_minor_units(currency))
       and total_amount = round(subtotal + tax_amount + service_fee + tip_amount - points_discount,
         public.checkout_currency_minor_units(currency))
     )
@@ -100,7 +110,42 @@ alter table public.menu_order_items
   drop constraint if exists menu_order_items_secure_line_total_check;
 alter table public.menu_order_items
   add constraint menu_order_items_secure_line_total_check
-  check (quantity > 0 and unit_price >= 0 and line_total = unit_price * quantity) not valid;
+  check (quantity > 0) not valid;
+
+create or replace function public.validate_menu_order_item_checkout_amount()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  selected_order public.menu_orders%rowtype;
+  minor_units integer;
+begin
+  select * into selected_order from public.menu_orders where id = new.order_id;
+  if not found or new.quantity <= 0
+     or new.unit_price::text in ('NaN', 'Infinity', '-Infinity')
+     or new.line_total::text in ('NaN', 'Infinity', '-Infinity')
+     or new.unit_price < 0
+     or new.line_total <> new.unit_price * new.quantity then
+    raise exception 'Menu order line amount is invalid';
+  end if;
+  if selected_order.pricing_version = 1 then
+    minor_units := public.checkout_currency_minor_units(selected_order.currency);
+    if minor_units is null
+       or new.unit_price <> round(new.unit_price, minor_units)
+       or new.line_total <> round(new.line_total, minor_units) then
+      raise exception 'Menu order line does not match currency precision';
+    end if;
+  end if;
+  return new;
+end;
+$$;
+revoke all on function public.validate_menu_order_item_checkout_amount() from public, anon, authenticated;
+drop trigger if exists menu_order_item_checkout_amount_validation on public.menu_order_items;
+create trigger menu_order_item_checkout_amount_validation
+before insert or update of order_id, unit_price, quantity, line_total on public.menu_order_items
+for each row execute function public.validate_menu_order_item_checkout_amount();
 
 create or replace function public.validate_menu_payment_attempt_total()
 returns trigger
@@ -113,8 +158,11 @@ declare
 begin
   select * into selected_order from public.menu_orders where id = new.order_id;
   if not found or selected_order.pricing_version <> 1
+     or new.amount::text in ('NaN', 'Infinity', '-Infinity')
      or new.amount <> selected_order.total_amount
      or upper(new.currency) <> upper(selected_order.currency)
+     or public.checkout_currency_minor_units(new.currency) is null
+     or new.amount <> round(new.amount, public.checkout_currency_minor_units(new.currency))
      or new.amount <= 0 then
     raise exception 'Menu payment attempt does not match a secure order total';
   end if;
@@ -414,6 +462,60 @@ create unique index if not exists menu_payment_attempts_one_active_per_order
   on public.menu_payment_attempts (order_id)
   where status in ('initiated', 'redirected');
 
+create table if not exists public.menu_duplicate_payment_captures (
+  id uuid primary key default gen_random_uuid(),
+  order_id uuid not null references public.menu_orders(id) on delete restrict,
+  payment_attempt_id uuid not null references public.menu_payment_attempts(id) on delete restrict,
+  transaction_id text not null unique,
+  tx_ref text not null,
+  amount numeric(20,4) not null check (amount > 0 and amount::text not in ('NaN', 'Infinity', '-Infinity')),
+  currency text not null check (public.checkout_currency_minor_units(currency) is not null),
+  status text not null default 'manual_review' check (status in ('manual_review', 'refunded', 'resolved')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  check (amount = round(amount, public.checkout_currency_minor_units(currency)))
+);
+
+alter table public.menu_duplicate_payment_captures enable row level security;
+revoke all on public.menu_duplicate_payment_captures from public, anon, authenticated;
+grant select on public.menu_duplicate_payment_captures to authenticated;
+grant all on public.menu_duplicate_payment_captures to service_role;
+drop policy if exists menu_duplicate_payment_captures_manager_read on public.menu_duplicate_payment_captures;
+create policy menu_duplicate_payment_captures_manager_read
+  on public.menu_duplicate_payment_captures for select to authenticated
+  using (exists (
+    select 1 from public.user_profiles up
+     where up.user_id = auth.uid() and up.role in ('manager', 'admin')
+  ));
+
+create or replace function public.record_menu_duplicate_payment_capture()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  selected_order public.menu_orders%rowtype;
+begin
+  if new.status <> 'manual_review' or new.transaction_id is null then return new; end if;
+  select * into selected_order from public.menu_orders where id = new.order_id;
+  if found and selected_order.payment_status = 'paid'
+     and selected_order.flutterwave_transaction_id is distinct from new.transaction_id then
+    insert into public.menu_duplicate_payment_captures (
+      order_id, payment_attempt_id, transaction_id, tx_ref, amount, currency
+    ) values (
+      selected_order.id, new.id, new.transaction_id, new.tx_ref, new.amount, new.currency
+    ) on conflict (transaction_id) do nothing;
+  end if;
+  return new;
+end;
+$$;
+revoke all on function public.record_menu_duplicate_payment_capture() from public, anon, authenticated;
+drop trigger if exists menu_duplicate_payment_capture_record on public.menu_payment_attempts;
+create trigger menu_duplicate_payment_capture_record
+  after insert or update of status, transaction_id on public.menu_payment_attempts
+  for each row execute function public.record_menu_duplicate_payment_capture();
+
 create or replace function public.create_menu_payment_attempt(
   target_order_id uuid,
   target_user_id uuid,
@@ -554,6 +656,10 @@ begin
     from public.menu_orders
    where order_number = substring(new.invoice_number from 6) and pricing_version = 1;
   if not found then return new; end if;
+  insert into public.books_invoice_lines (invoice_id, organization_id, description, quantity, unit_price)
+  select new.id, new.organization_id, item_name, quantity, unit_price
+    from public.menu_order_items
+   where order_id = selected_order.id;
   if selected_order.service_fee > 0 then
     insert into public.books_invoice_lines (invoice_id, organization_id, description, quantity, unit_price)
     values (new.id, new.organization_id, 'Service fee', 1, selected_order.service_fee);

@@ -9,9 +9,21 @@ alter table public.hotel_bookings
   add constraint hotel_bookings_secure_total_check
   check (
     public.checkout_currency_minor_units(currency_code) is not null
+    and nightly_subtotal::text not in ('NaN', 'Infinity', '-Infinity')
+    and discount_amount::text not in ('NaN', 'Infinity', '-Infinity')
+    and taxable_subtotal::text not in ('NaN', 'Infinity', '-Infinity')
+    and vat_amount::text not in ('NaN', 'Infinity', '-Infinity')
+    and lht_amount::text not in ('NaN', 'Infinity', '-Infinity')
+    and total_amount::text not in ('NaN', 'Infinity', '-Infinity')
     and nightly_subtotal >= 0 and discount_amount >= 0 and discount_amount <= nightly_subtotal
     and taxable_subtotal = nightly_subtotal - discount_amount
     and vat_amount >= 0 and lht_amount >= 0
+    and nightly_subtotal = round(nightly_subtotal, public.checkout_currency_minor_units(currency_code))
+    and discount_amount = round(discount_amount, public.checkout_currency_minor_units(currency_code))
+    and taxable_subtotal = round(taxable_subtotal, public.checkout_currency_minor_units(currency_code))
+    and vat_amount = round(vat_amount, public.checkout_currency_minor_units(currency_code))
+    and lht_amount = round(lht_amount, public.checkout_currency_minor_units(currency_code))
+    and total_amount = round(total_amount, public.checkout_currency_minor_units(currency_code))
     and total_amount = round(taxable_subtotal + vat_amount + lht_amount,
       public.checkout_currency_minor_units(currency_code))
   ) not valid;
@@ -36,10 +48,13 @@ create policy hotel_payment_attempts_owner_or_manager_select
   on public.hotel_payment_attempts for select to authenticated
   using (exists (
     select 1 from public.hotel_bookings hb
-    join public.user_profiles up on up.user_id = auth.uid() and up.role = 'manager'
-    join public.books_memberships bm on bm.user_id = up.user_id
-      and bm.organization_id = hb.organization_id and bm.role in ('owner', 'admin')
     where hb.id = hotel_payment_attempts.booking_id
+      and (hb.user_id = auth.uid() or exists (
+        select 1 from public.user_profiles up
+        join public.books_memberships bm on bm.user_id = up.user_id
+        where up.user_id = auth.uid() and up.role = 'manager'
+          and bm.organization_id = hb.organization_id and bm.role in ('owner', 'admin')
+      ))
   ));
 
 do $$
@@ -65,8 +80,14 @@ begin
       add constraint hotel_rooms_currency_precision_check
       check (
         public.checkout_currency_minor_units(currency_code) is not null
+        and nightly_rate::text not in ('NaN', 'Infinity', '-Infinity')
+        and nightly_rate > 0
         and nightly_rate = round(nightly_rate, public.checkout_currency_minor_units(currency_code))
-        and (original_nightly_rate is null or original_nightly_rate = round(original_nightly_rate, public.checkout_currency_minor_units(currency_code)))
+        and (original_nightly_rate is null or (
+          original_nightly_rate::text not in ('NaN', 'Infinity', '-Infinity')
+          and original_nightly_rate >= nightly_rate
+          and original_nightly_rate = round(original_nightly_rate, public.checkout_currency_minor_units(currency_code))
+        ))
       ) not valid;
   end if;
 end;
@@ -98,8 +119,11 @@ declare
   selected_booking public.hotel_bookings%rowtype;
 begin
   select * into selected_booking from public.hotel_bookings where id = new.booking_id;
-  if not found or new.amount <> selected_booking.total_amount
+  if not found or new.amount::text in ('NaN', 'Infinity', '-Infinity')
+     or new.amount <> selected_booking.total_amount
      or upper(new.currency_code) <> upper(selected_booking.currency_code)
+     or public.checkout_currency_minor_units(new.currency_code) is null
+     or new.amount <> round(new.amount, public.checkout_currency_minor_units(new.currency_code))
      or new.amount <= 0 then
     raise exception 'Hotel payment attempt does not match its stored booking total';
   end if;
@@ -119,11 +143,12 @@ create table if not exists public.hotel_duplicate_payment_captures (
   payment_attempt_id uuid not null references public.hotel_payment_attempts(id) on delete restrict,
   transaction_id text not null unique,
   tx_ref text not null,
-  amount numeric(14,2) not null check (amount > 0),
-  currency_code char(3) not null,
+  amount numeric(14,2) not null check (amount > 0 and amount::text not in ('NaN', 'Infinity', '-Infinity')),
+  currency_code char(3) not null check (public.checkout_currency_minor_units(currency_code) is not null),
   status text not null default 'manual_review' check (status in ('manual_review', 'refunded', 'resolved')),
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  check (amount = round(amount, public.checkout_currency_minor_units(currency_code)))
 );
 
 alter table public.hotel_duplicate_payment_captures enable row level security;
@@ -374,6 +399,10 @@ begin
   nights_count := target_check_out - target_check_in;
   currency_decimals := public.checkout_currency_minor_units(selected_room.currency_code);
   if currency_decimals is null then raise exception 'Room currency is not supported for checkout'; end if;
+  if selected_room.nightly_rate <> round(selected_room.nightly_rate, currency_decimals)
+     or (selected_room.original_nightly_rate is not null and selected_room.original_nightly_rate <> round(selected_room.original_nightly_rate, currency_decimals)) then
+    raise exception 'Room rate does not match the currency precision';
+  end if;
 
   room_subtotal := round(
     selected_room.nightly_rate * nights_count * target_room_count,
@@ -522,7 +551,11 @@ declare
   selected_attempt public.hotel_payment_attempts%rowtype;
   created_attempt public.hotel_payment_attempts%rowtype;
 begin
-  if nullif(target_tx_ref, '') is null then raise exception 'Payment reference is required'; end if;
+  if target_booking_id is null or target_access_token_hash is null
+     or length(target_access_token_hash) <> 64
+     or nullif(target_tx_ref, '') is null or length(target_tx_ref) > 255 then
+    raise exception 'Payment request is invalid';
+  end if;
   select * into selected_booking
     from public.hotel_bookings
    where id = target_booking_id
@@ -589,7 +622,10 @@ declare
   duplicate_capture_exists boolean;
   resolved_status text := 'confirmed';
 begin
-  if nullif(target_transaction_id, '') is null then raise exception 'Verified payment transaction ID is required'; end if;
+  if nullif(btrim(target_tx_ref), '') is null or nullif(btrim(target_transaction_id), '') is null then
+    raise exception 'Verified payment reference and transaction ID are required';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended('hotel-payment:' || target_transaction_id, 0));
   select hb.room_id into target_room_id
     from public.hotel_payment_attempts hpa
     join public.hotel_bookings hb on hb.id = hpa.booking_id
@@ -676,7 +712,9 @@ grant execute on function public.confirm_hotel_booking_payment(text, text) to se
 create or replace function public.apply_books_invoice_tax()
 returns trigger language plpgsql security definer set search_path = pg_catalog, public
 as $$
-declare selected_rate numeric;
+declare
+  selected_rate numeric;
+  selected_booking public.hotel_bookings%rowtype;
 begin
   if new.tax_rate_id is not null then
     select rate_percentage into selected_rate
@@ -703,9 +741,244 @@ begin
     new.tax_rate_percentage := 0;
     new.tax_amount := 0;
   end if;
+
+  if new.invoice_number like 'HOTEL-%' then
+    select * into selected_booking
+      from public.hotel_bookings
+     where 'HOTEL-' || confirmation_number = new.invoice_number;
+    if found and (
+      new.currency_code::text <> selected_booking.currency_code::text
+      or new.subtotal <> selected_booking.taxable_subtotal
+      or new.tax_amount <> selected_booking.vat_amount
+      or new.other_charges <> selected_booking.lht_amount
+    ) then
+      raise exception 'Hotel invoice totals do not match the verified reservation';
+    end if;
+  end if;
   return new;
 end;
 $$;
+
+create or replace function public.enforce_checkout_invoice_totals()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  selected_menu_order public.menu_orders%rowtype;
+  selected_event_booking public.special_event_bookings%rowtype;
+  selected_hotel_booking public.hotel_bookings%rowtype;
+begin
+  select * into selected_menu_order
+    from public.menu_orders
+   where books_invoice_id = new.id and pricing_version = 1;
+  if not found and left(new.invoice_number, 5) = 'MENU-' then
+    select * into selected_menu_order
+      from public.menu_orders
+     where order_number = substring(new.invoice_number from 6) and pricing_version = 1;
+  end if;
+  if found then
+    new.currency_code := upper(selected_menu_order.currency)::char(3);
+    new.subtotal := selected_menu_order.subtotal;
+    new.tax_amount := selected_menu_order.tax_amount;
+    new.other_charges := selected_menu_order.service_fee + selected_menu_order.tip_amount;
+    new.total := selected_menu_order.total_amount;
+    return new;
+  end if;
+
+  select * into selected_event_booking
+    from public.special_event_bookings
+   where books_invoice_id = new.id;
+  if not found and left(new.invoice_number, 6) = 'EVENT-' then
+    select * into selected_event_booking
+      from public.special_event_bookings
+     where order_number = substring(new.invoice_number from 7);
+  end if;
+  if found then
+    new.currency_code := upper(selected_event_booking.currency)::char(3);
+    new.subtotal := selected_event_booking.total_amount;
+    new.tax_rate_id := null;
+    new.tax_rate_percentage := 0;
+    new.tax_amount := 0;
+    new.other_charges := 0;
+    new.total := selected_event_booking.total_amount;
+    return new;
+  end if;
+
+  select * into selected_hotel_booking
+    from public.hotel_bookings
+   where books_invoice_id = new.id;
+  if not found and left(new.invoice_number, 6) = 'HOTEL-' then
+    select * into selected_hotel_booking
+      from public.hotel_bookings
+     where 'HOTEL-' || confirmation_number = new.invoice_number;
+  end if;
+  if found then
+    new.currency_code := selected_hotel_booking.currency_code;
+    new.subtotal := selected_hotel_booking.taxable_subtotal;
+    new.tax_rate_percentage := 18;
+    new.tax_amount := selected_hotel_booking.vat_amount;
+    new.other_charges := selected_hotel_booking.lht_amount;
+    new.total := selected_hotel_booking.total_amount;
+  end if;
+  return new;
+end;
+$$;
+revoke all on function public.enforce_checkout_invoice_totals() from public, anon, authenticated;
+drop trigger if exists zzzz_checkout_invoice_totals_before_write on public.books_invoices;
+create trigger zzzz_checkout_invoice_totals_before_write
+before insert or update on public.books_invoices
+for each row execute function public.enforce_checkout_invoice_totals();
+
+create or replace function public.normalize_hotel_invoice_line()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  selected_invoice public.books_invoices%rowtype;
+  selected_booking public.hotel_bookings%rowtype;
+begin
+  select * into selected_invoice from public.books_invoices where id = new.invoice_id;
+  if not found then return new; end if;
+  select * into selected_booking
+    from public.hotel_bookings
+   where books_invoice_id = selected_invoice.id;
+  if not found and left(selected_invoice.invoice_number, 6) = 'HOTEL-' then
+    select * into selected_booking
+      from public.hotel_bookings
+     where 'HOTEL-' || confirmation_number = selected_invoice.invoice_number;
+  end if;
+  if found then
+    if new.organization_id <> selected_invoice.organization_id then
+      raise exception 'Hotel invoice line organization does not match its invoice';
+    end if;
+    new.quantity := 1;
+    new.unit_price := selected_booking.taxable_subtotal;
+  end if;
+  return new;
+end;
+$$;
+revoke all on function public.normalize_hotel_invoice_line() from public, anon, authenticated;
+drop trigger if exists hotel_invoice_line_normalize on public.books_invoice_lines;
+create trigger hotel_invoice_line_normalize
+before insert or update of invoice_id, quantity, unit_price on public.books_invoice_lines
+for each row execute function public.normalize_hotel_invoice_line();
+
+create or replace function public.protect_checkout_invoice_lines()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  invoice_ids uuid[];
+begin
+  if tg_op = 'UPDATE' then
+    invoice_ids := array[old.invoice_id, new.invoice_id];
+  else
+    invoice_ids := array[old.invoice_id];
+  end if;
+  if exists (
+    select 1 from public.books_invoices invoice_row
+     where invoice_row.id = any(invoice_ids)
+       and (invoice_row.invoice_number like 'MENU-%'
+         or invoice_row.invoice_number like 'EVENT-%'
+         or invoice_row.invoice_number like 'HOTEL-%')
+  ) then
+    raise exception 'Checkout invoice lines cannot be changed or deleted';
+  end if;
+  if tg_op = 'DELETE' then return old; end if;
+  return new;
+end;
+$$;
+revoke all on function public.protect_checkout_invoice_lines() from public, anon, authenticated;
+drop trigger if exists checkout_invoice_lines_immutable on public.books_invoice_lines;
+create trigger checkout_invoice_lines_immutable
+before update or delete on public.books_invoice_lines
+for each row execute function public.protect_checkout_invoice_lines();
+
+create or replace function public.validate_checkout_invoice_line_sum()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  invoice_id_value uuid;
+  selected_invoice public.books_invoices%rowtype;
+  recorded_amount numeric;
+  expected_amount numeric;
+begin
+  if tg_op = 'DELETE' then
+    invoice_id_value := old.invoice_id;
+  else
+    invoice_id_value := new.invoice_id;
+  end if;
+  select * into selected_invoice from public.books_invoices where id = invoice_id_value;
+  if not found or not (
+    selected_invoice.invoice_number like 'MENU-%'
+    or selected_invoice.invoice_number like 'EVENT-%'
+    or selected_invoice.invoice_number like 'HOTEL-%'
+  ) then
+    return null;
+  end if;
+  select coalesce(sum(line_total), 0) into recorded_amount
+    from public.books_invoice_lines
+   where invoice_id = invoice_id_value;
+  expected_amount := selected_invoice.subtotal;
+  if selected_invoice.invoice_number like 'MENU-%' then
+    expected_amount := expected_amount + selected_invoice.other_charges;
+  end if;
+  if recorded_amount <> expected_amount then
+    raise exception 'Checkout invoice detail lines do not match the invoice total';
+  end if;
+  return null;
+end;
+$$;
+revoke all on function public.validate_checkout_invoice_line_sum() from public, anon, authenticated;
+drop trigger if exists checkout_invoice_line_sum_check on public.books_invoice_lines;
+create constraint trigger checkout_invoice_line_sum_check
+after insert or update or delete on public.books_invoice_lines
+deferrable initially deferred
+for each row execute function public.validate_checkout_invoice_line_sum();
+
+create or replace function public.validate_checkout_invoice_header_lines()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  recorded_amount numeric;
+  expected_amount numeric;
+begin
+  if new.invoice_number not like 'MENU-%'
+     and new.invoice_number not like 'EVENT-%'
+     and new.invoice_number not like 'HOTEL-%' then
+    return null;
+  end if;
+  select coalesce(sum(line_total), 0) into recorded_amount
+    from public.books_invoice_lines
+   where invoice_id = new.id;
+  expected_amount := new.subtotal;
+  if new.invoice_number like 'MENU-%' then
+    expected_amount := expected_amount + new.other_charges;
+  end if;
+  if recorded_amount <> expected_amount then
+    raise exception 'Checkout invoice detail lines do not match the invoice total';
+  end if;
+  return null;
+end;
+$$;
+revoke all on function public.validate_checkout_invoice_header_lines() from public, anon, authenticated;
+drop trigger if exists checkout_invoice_header_line_sum_check on public.books_invoices;
+create constraint trigger checkout_invoice_header_line_sum_check
+after insert or update on public.books_invoices
+deferrable initially deferred
+for each row execute function public.validate_checkout_invoice_header_lines();
 
 notify pgrst, 'reload schema';
 commit;

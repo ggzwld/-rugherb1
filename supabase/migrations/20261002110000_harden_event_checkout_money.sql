@@ -18,14 +18,18 @@ create table if not exists public.special_event_duplicate_captures (
   payment_attempt_id uuid not null references public.special_event_payment_attempts(id) on delete restrict,
   transaction_id text not null unique,
   tx_ref text not null,
-  amount numeric(12,2) not null check (amount > 0),
-  currency text not null check (char_length(currency) = 3),
+  amount numeric(12,2) not null check (amount > 0 and amount::text not in ('NaN', 'Infinity', '-Infinity')),
+  currency text not null check (char_length(currency) = 3 and public.checkout_currency_minor_units(currency) is not null),
   status text not null default 'manual_review' check (status in ('manual_review', 'refunded', 'resolved')),
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  check (amount = round(amount, public.checkout_currency_minor_units(currency)))
 );
 
 alter table public.special_event_duplicate_captures enable row level security;
+revoke all on public.special_event_duplicate_captures from public, anon, authenticated;
+grant select on public.special_event_duplicate_captures to authenticated;
+grant all on public.special_event_duplicate_captures to service_role;
 drop policy if exists special_event_duplicate_captures_manager_read on public.special_event_duplicate_captures;
 create policy special_event_duplicate_captures_manager_read
   on public.special_event_duplicate_captures
@@ -39,8 +43,18 @@ alter table public.special_event_bookings
   add constraint special_event_bookings_secure_total_check
   check (
     public.checkout_currency_minor_units(currency) is not null
+    and subtotal::text not in ('NaN', 'Infinity', '-Infinity')
+    and service_fee::text not in ('NaN', 'Infinity', '-Infinity')
+    and tax_amount::text not in ('NaN', 'Infinity', '-Infinity')
+    and discount_amount::text not in ('NaN', 'Infinity', '-Infinity')
+    and total_amount::text not in ('NaN', 'Infinity', '-Infinity')
     and subtotal >= 0 and service_fee >= 0 and tax_amount >= 0
     and discount_amount >= 0 and discount_amount <= subtotal + service_fee + tax_amount
+    and subtotal = round(subtotal, public.checkout_currency_minor_units(currency))
+    and service_fee = round(service_fee, public.checkout_currency_minor_units(currency))
+    and tax_amount = round(tax_amount, public.checkout_currency_minor_units(currency))
+    and discount_amount = round(discount_amount, public.checkout_currency_minor_units(currency))
+    and total_amount = round(total_amount, public.checkout_currency_minor_units(currency))
     and total_amount = round(subtotal + service_fee + tax_amount - discount_amount,
       public.checkout_currency_minor_units(currency))
   ) not valid;
@@ -55,8 +69,11 @@ declare
   selected_booking public.special_event_bookings%rowtype;
 begin
   select * into selected_booking from public.special_event_bookings where id = new.booking_id;
-  if not found or new.amount <> selected_booking.total_amount
+  if not found or new.amount::text in ('NaN', 'Infinity', '-Infinity')
+     or new.amount <> selected_booking.total_amount
      or upper(new.currency) <> upper(selected_booking.currency)
+     or public.checkout_currency_minor_units(new.currency) is null
+     or new.amount <> round(new.amount, public.checkout_currency_minor_units(new.currency))
      or new.amount <= 0 then
     raise exception 'Event payment attempt does not match its stored booking total';
   end if;
@@ -209,6 +226,47 @@ begin
   perform pg_advisory_xact_lock(hashtextextended(v_user_id::text || target_idempotency_key::text, 0));
   select * into v_event from public.special_events where id = target_event_id for update;
   if not found then raise exception 'Special event not found'; end if;
+
+  select * into v_existing
+    from public.special_event_bookings
+   where user_id = v_user_id and idempotency_key = target_idempotency_key
+   for update;
+  if found then
+    v_request := jsonb_build_object(
+      'eventId', target_event_id,
+      'quantity', target_quantity,
+      'ticketTypeId', coalesce(target_ticket_type_id, v_existing.ticket_type_id),
+      'firstName', btrim(guest_first_name),
+      'lastName', btrim(guest_last_name),
+      'email', lower(btrim(guest_email)),
+      'phone', nullif(btrim(guest_phone), ''),
+      'specialRequests', nullif(btrim(special_requests), ''),
+      'attendeeNames', coalesce(to_jsonb(target_attendee_names), 'null'::jsonb),
+      'invitationId', target_invitation_id,
+      'shareToken', target_share_token
+    );
+    if v_existing.event_id <> target_event_id
+       or v_existing.quantity <> target_quantity
+       or v_existing.ticket_type_id <> coalesce(target_ticket_type_id, v_existing.ticket_type_id)
+       or (v_existing.checkout_request is not null and v_existing.checkout_request is distinct from v_request)
+       or (v_existing.checkout_request is null and (
+         lower(v_existing.guest_email) <> lower(btrim(guest_email))
+         or v_existing.guest_first_name <> btrim(guest_first_name)
+         or v_existing.guest_last_name <> btrim(guest_last_name)
+         or v_existing.guest_phone is distinct from nullif(btrim(guest_phone), '')
+         or v_existing.special_requests is distinct from nullif(btrim(special_requests), '')
+         or v_existing.attendee_names is distinct from coalesce(target_attendee_names, array_fill(concat_ws(' ', btrim(guest_first_name), btrim(guest_last_name)), array[target_quantity]))
+         or v_existing.event_invitation_id is distinct from case when v_event.is_private then target_invitation_id else null end
+       )) then
+      raise exception 'Checkout key was already used for different booking details';
+    end if;
+    if v_existing.checkout_request is null then
+      update public.special_event_bookings set checkout_request = v_request where id = v_existing.id;
+    end if;
+    return query select v_existing.id, v_existing.order_number, v_existing.total_amount, v_existing.currency;
+    return;
+  end if;
+
   perform public.expire_special_event_holds(target_event_id);
 
   if v_event.is_private then
@@ -258,33 +316,6 @@ begin
     'invitationId', target_invitation_id,
     'shareToken', target_share_token
   );
-
-  select * into v_existing
-    from public.special_event_bookings
-   where user_id = v_user_id and idempotency_key = target_idempotency_key
-   for update;
-  if found then
-    if v_existing.event_id <> target_event_id
-       or (v_existing.checkout_request is not null and v_existing.checkout_request is distinct from v_request)
-       or (v_existing.checkout_request is null and (
-         v_existing.quantity <> target_quantity
-         or v_existing.ticket_type_id <> v_type.id
-         or lower(v_existing.guest_email) <> lower(btrim(guest_email))
-         or v_existing.guest_first_name <> btrim(guest_first_name)
-         or v_existing.guest_last_name <> btrim(guest_last_name)
-         or v_existing.guest_phone is distinct from nullif(btrim(guest_phone), '')
-         or v_existing.special_requests is distinct from nullif(btrim(special_requests), '')
-         or v_existing.attendee_names is distinct from coalesce(target_attendee_names, array_fill(concat_ws(' ', btrim(guest_first_name), btrim(guest_last_name)), array[target_quantity]))
-         or v_existing.event_invitation_id is distinct from case when v_event.is_private then target_invitation_id else null end
-       )) then
-      raise exception 'Checkout key was already used for different booking details';
-    end if;
-    if v_existing.checkout_request is null then
-      update public.special_event_bookings set checkout_request = v_request where id = v_existing.id;
-    end if;
-    return query select v_existing.id, v_existing.order_number, v_existing.total_amount, v_existing.currency;
-    return;
-  end if;
 
   if v_event.is_private then
     select b.* into v_existing
@@ -358,6 +389,10 @@ declare
   v_type_remaining bigint;
   v_review boolean := false;
 begin
+  if target_booking_id is null or nullif(target_transaction_id, '') is null then
+    raise exception 'Verified event payment details are required';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended('special-event-payment:' || target_transaction_id, 0));
   select booking.event_id into v_event.id
     from public.special_event_bookings as booking
    where booking.id = target_booking_id;
@@ -395,6 +430,11 @@ begin
    where booking_id = v_booking.id
    for update;
   if (found and prior_payment.transaction_id is distinct from target_transaction_id)
+     or exists (
+       select 1 from public.special_event_payments other_payment
+        where other_payment.transaction_id = target_transaction_id
+          and other_payment.booking_id <> v_booking.id
+     )
      or v_booking.payment_status in ('paid', 'refunded', 'partially_refunded')
      or v_booking.status in ('confirmed', 'refunded') then
     update public.special_event_payment_attempts
@@ -513,7 +553,7 @@ $$;
 revoke all on function public.normalize_event_invoice_line() from public, anon, authenticated;
 drop trigger if exists event_invoice_line_normalize on public.books_invoice_lines;
 create trigger event_invoice_line_normalize
-before insert on public.books_invoice_lines
+before insert or update of invoice_id, quantity, unit_price on public.books_invoice_lines
 for each row execute function public.normalize_event_invoice_line();
 
 notify pgrst, 'reload schema';

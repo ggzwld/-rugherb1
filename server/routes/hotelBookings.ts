@@ -213,13 +213,23 @@ const createBooking: RequestHandler = async (request, response) => {
     if (!body.accessToken || body.accessToken.length < 32 || body.accessToken.length > 256) throw new HotelBookingError("Booking access credential is invalid");
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !Number.isInteger(body.guestCount) || !Number.isInteger(body.roomCount)) throw new HotelBookingError("Enter valid guest and room details");
     if (!Array.isArray(body.preferences) || body.preferences.some((value) => typeof value !== "string")) throw new HotelBookingError("Room preferences are invalid");
-    const rateLimitAllowed = await callServiceRpc<boolean>("consume_hotel_booking_rate_limit", { target_rate_limit_key: rateLimitKey });
-    if (!rateLimitAllowed) throw new HotelBookingError("Too many reservation attempts. Please try again later", 429);
-    const ratesSnapshot = await fetchAndStoreRates();
-    const selectedRoom = (await readService<Array<{ currency_code: string }>>(`hotel_rooms?id=eq.${encodeURIComponent(body.roomId)}&status=eq.published&select=currency_code`))[0];
-    if (!selectedRoom) throw new HotelBookingError("This room is not available for booking", 404);
-    const currency = selectedRoom.currency_code.trim().toUpperCase();
-    if (!supportedCurrencies.has(currency) || !ratesSnapshot.rates[currency]) throw new HotelBookingError("This room uses an unsupported booking currency");
+    const accessTokenHash = createHash("sha256").update(body.accessToken).digest("hex");
+    const bookingWithKey = (await readService<Array<{ user_id: string | null; access_token_hash: string; fx_rates_snapshot: { as_of?: string } | null }>>(
+      `hotel_bookings?idempotency_key=eq.${encodeURIComponent(body.idempotencyKey)}&select=user_id,access_token_hash,fx_rates_snapshot&limit=1`,
+    ))[0];
+    const existingBooking = bookingWithKey?.user_id === userId && bookingWithKey.access_token_hash === accessTokenHash
+      ? bookingWithKey
+      : null;
+    let ratesSnapshot: { rates: Record<string, number>; asOf: string; provider: string } | null = null;
+    if (!existingBooking) {
+      const rateLimitAllowed = await callServiceRpc<boolean>("consume_hotel_booking_rate_limit", { target_rate_limit_key: rateLimitKey });
+      if (!rateLimitAllowed) throw new HotelBookingError("Too many reservation attempts. Please try again later", 429);
+      ratesSnapshot = await fetchAndStoreRates();
+      const selectedRoom = (await readService<Array<{ currency_code: string }>>(`hotel_rooms?id=eq.${encodeURIComponent(body.roomId)}&status=eq.published&select=currency_code`))[0];
+      if (!selectedRoom) throw new HotelBookingError("This room is not available for booking", 404);
+      const currency = selectedRoom.currency_code.trim().toUpperCase();
+      if (!supportedCurrencies.has(currency) || !ratesSnapshot.rates[currency]) throw new HotelBookingError("This room uses an unsupported booking currency");
+    }
 
     const rows = await callServiceRpc<Array<{ booking_id: string; confirmation_number: string; total_amount: number; currency_code: string; expires_at: string }>>(
       "create_hotel_booking",
@@ -239,13 +249,17 @@ const createBooking: RequestHandler = async (request, response) => {
         target_preferences: body.preferences,
         target_user_id: userId,
         target_idempotency_key: body.idempotencyKey,
-        target_access_token_hash: createHash("sha256").update(body.accessToken).digest("hex"),
-        target_fx_rates: { ...ratesSnapshot.rates, as_of: ratesSnapshot.asOf, provider: ratesSnapshot.provider },
+        target_access_token_hash: accessTokenHash,
+        target_fx_rates: ratesSnapshot ? { ...ratesSnapshot.rates, as_of: ratesSnapshot.asOf, provider: ratesSnapshot.provider } : null,
       },
     );
     const booking = rows[0];
     if (!booking) throw new Error("Reservation was not returned after creation");
-    response.json({ ...booking, accessToken: body.accessToken, fxAsOf: ratesSnapshot.asOf });
+    response.json({
+      ...booking,
+      accessToken: body.accessToken,
+      fxAsOf: ratesSnapshot?.asOf ?? existingBooking?.fx_rates_snapshot?.as_of ?? null,
+    });
   } catch (error) {
     response.status(error instanceof HotelBookingError ? error.status : 503).json({
       error: error instanceof Error ? error.message : "Unable to create hotel reservation",
