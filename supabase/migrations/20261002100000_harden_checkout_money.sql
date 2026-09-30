@@ -1,5 +1,78 @@
 begin;
 
+create or replace function public.checkout_currency_minor_units(target_currency text)
+returns smallint
+language sql
+immutable
+set search_path = pg_catalog
+as $$
+  select case upper(btrim(target_currency))
+    when 'BIF' then 0
+    when 'CLP' then 0
+    when 'DJF' then 0
+    when 'GNF' then 0
+    when 'JPY' then 0
+    when 'KMF' then 0
+    when 'KRW' then 0
+    when 'PYG' then 0
+    when 'RWF' then 0
+    when 'UGX' then 0
+    when 'VND' then 0
+    when 'VUV' then 0
+    when 'XAF' then 0
+    when 'XOF' then 0
+    when 'XPF' then 0
+    when 'USD' then 2
+    when 'EUR' then 2
+    when 'GBP' then 2
+    when 'CAD' then 2
+    when 'AUD' then 2
+    when 'CHF' then 2
+    when 'CNY' then 2
+    when 'INR' then 2
+    when 'KES' then 2
+    when 'TZS' then 2
+    when 'CDF' then 2
+    when 'ZAR' then 2
+    when 'AED' then 2
+    when 'SGD' then 2
+    else null
+  end::smallint;
+$$;
+
+revoke all on function public.checkout_currency_minor_units(text) from public, anon, authenticated;
+grant execute on function public.checkout_currency_minor_units(text) to authenticated, service_role;
+
+create or replace function public.validate_menu_item_checkout_price()
+returns trigger
+language plpgsql
+set search_path = pg_catalog, public
+as $$
+declare
+  minor_units integer;
+begin
+  minor_units := public.checkout_currency_minor_units(new.currency);
+  if minor_units is null then raise exception 'Menu item currency is not supported for checkout'; end if;
+  if new.price::text in ('NaN', 'Infinity', '-Infinity') or new.price < 0
+     or new.price <> round(new.price, minor_units) then
+    raise exception 'Menu item price does not match its currency precision';
+  end if;
+  if new.original_price is not null and (
+    new.original_price::text in ('NaN', 'Infinity', '-Infinity')
+    or new.original_price < new.price
+    or new.original_price <> round(new.original_price, minor_units)
+  ) then
+    raise exception 'Menu item original price is invalid';
+  end if;
+  return new;
+end;
+$$;
+revoke all on function public.validate_menu_item_checkout_price() from public, anon, authenticated;
+drop trigger if exists menu_item_checkout_price_validation on public.menu_items;
+create trigger menu_item_checkout_price_validation
+before insert or update of currency, price, original_price on public.menu_items
+for each row execute function public.validate_menu_item_checkout_price();
+
 alter table public.menu_orders
   add column if not exists pricing_version smallint not null default 0,
   add column if not exists checkout_idempotency_key uuid,
@@ -8,6 +81,51 @@ alter table public.menu_orders
 create unique index if not exists menu_orders_checkout_idempotency_key
   on public.menu_orders (user_id, checkout_idempotency_key)
   where checkout_idempotency_key is not null;
+
+alter table public.menu_orders
+  drop constraint if exists menu_orders_secure_total_check;
+alter table public.menu_orders
+  add constraint menu_orders_secure_total_check
+  check (
+    pricing_version <> 1 or (
+      public.checkout_currency_minor_units(currency) is not null
+      and subtotal >= 0 and tax_amount >= 0 and service_fee >= 0 and tip_amount >= 0
+      and points_discount = 0
+      and total_amount = round(subtotal + tax_amount + service_fee + tip_amount - points_discount,
+        public.checkout_currency_minor_units(currency))
+    )
+  ) not valid;
+
+alter table public.menu_order_items
+  drop constraint if exists menu_order_items_secure_line_total_check;
+alter table public.menu_order_items
+  add constraint menu_order_items_secure_line_total_check
+  check (quantity > 0 and unit_price >= 0 and line_total = unit_price * quantity) not valid;
+
+create or replace function public.validate_menu_payment_attempt_total()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  selected_order public.menu_orders%rowtype;
+begin
+  select * into selected_order from public.menu_orders where id = new.order_id;
+  if not found or selected_order.pricing_version <> 1
+     or new.amount <> selected_order.total_amount
+     or upper(new.currency) <> upper(selected_order.currency)
+     or new.amount <= 0 then
+    raise exception 'Menu payment attempt does not match a secure order total';
+  end if;
+  return new;
+end;
+$$;
+revoke all on function public.validate_menu_payment_attempt_total() from public, anon, authenticated;
+drop trigger if exists menu_payment_attempt_total_validation on public.menu_payment_attempts;
+create trigger menu_payment_attempt_total_validation
+before insert or update of order_id, amount, currency on public.menu_payment_attempts
+for each row execute function public.validate_menu_payment_attempt_total();
 
 create or replace function public.create_menu_order(
   target_user_id uuid,
@@ -32,7 +150,7 @@ returns table (
 )
 language plpgsql
 security definer
-set search_path = public
+set search_path = pg_catalog, public
 as $$
 declare
   existing_order public.menu_orders%rowtype;
@@ -64,16 +182,19 @@ begin
   if target_user_id is null or target_idempotency_key is null then
     raise exception 'Checkout credentials are invalid';
   end if;
-  if target_order_type not in ('delivery', 'take-away', 'dine-in', 'room-service') then
+  if target_order_type is null or target_order_type not in ('delivery', 'take-away', 'dine-in', 'room-service') then
     raise exception 'Order type is invalid';
   end if;
-  if target_payment_method not in ('card', 'mobile-money', 'room-charge', 'cash') then
+  if target_payment_method is null or target_payment_method not in ('card', 'mobile-money', 'room-charge', 'cash') then
     raise exception 'Payment method is invalid';
   end if;
-  if jsonb_typeof(target_items) <> 'array' or jsonb_array_length(target_items) < 1 or jsonb_array_length(target_items) > 50 then
+  if target_items is null or jsonb_typeof(target_items) is distinct from 'array' then
     raise exception 'Select between one and fifty menu items';
   end if;
-  if target_customer is null or jsonb_typeof(target_customer) <> 'object' then
+  if jsonb_array_length(target_items) < 1 or jsonb_array_length(target_items) > 50 then
+    raise exception 'Select between one and fifty menu items';
+  end if;
+  if target_customer is null or jsonb_typeof(target_customer) is distinct from 'object' then
     raise exception 'Customer details are invalid';
   end if;
   customer_name := nullif(trim(concat_ws(' ', target_customer->>'firstName', target_customer->>'lastName')), '');
@@ -102,7 +223,8 @@ begin
   if target_order_type = 'delivery' and nullif(trim(target_customer->>'deliveryAddress'), '') is null then
     raise exception 'Delivery address is required for delivery';
   end if;
-  if target_tip_amount is null or target_tip_amount < 0 or target_tip_amount > 100000000 then
+  if target_tip_amount is null or target_tip_amount::text in ('NaN', 'Infinity', '-Infinity')
+     or target_tip_amount < 0 or target_tip_amount > 100000000 then
     raise exception 'Tip amount is invalid';
   end if;
 
@@ -190,12 +312,16 @@ begin
       raise exception 'A menu item has an invalid price';
     end if;
     item_currency := upper(trim(selected_item.currency));
-    if item_currency !~ '^[A-Z]{3}$' then raise exception 'A menu item has an invalid currency'; end if;
+    item_decimals := public.checkout_currency_minor_units(item_currency);
+    if item_decimals is null then raise exception 'A menu item has an unsupported checkout currency'; end if;
+    if selected_item.price <> round(selected_item.price, item_decimals)
+       or (selected_item.original_price is not null and selected_item.original_price <> round(selected_item.original_price, item_decimals)) then
+      raise exception 'A menu item price does not match its currency precision';
+    end if;
     if item_count > 0 and item_currency <> (priced_items->0->>'currency') then
       raise exception 'Checkout items must use one currency';
     end if;
-    item_decimals := case when item_currency in ('BIF', 'CLP', 'DJF', 'GNF', 'JPY', 'KMF', 'KRW', 'PYG', 'RWF', 'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF') then 0 else 2 end;
-    item_unit_price := round(selected_item.price, item_decimals);
+    item_unit_price := selected_item.price;
     subtotal_value := subtotal_value + item_unit_price * item_quantity;
     priced_items := priced_items || jsonb_build_array(jsonb_build_object(
       'id', selected_item.id,
@@ -207,9 +333,12 @@ begin
   end loop;
 
   item_currency := priced_items->0->>'currency';
-  item_decimals := case when item_currency in ('BIF', 'CLP', 'DJF', 'GNF', 'JPY', 'KMF', 'KRW', 'PYG', 'RWF', 'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF') then 0 else 2 end;
+  item_decimals := public.checkout_currency_minor_units(item_currency);
   if target_payment_method = 'mobile-money' and item_currency <> 'UGX' then
     raise exception 'Mobile Money is available only for UGX orders';
+  end if;
+  if target_tip_amount <> round(target_tip_amount, item_decimals) then
+    raise exception 'Tip amount does not match the order currency precision';
   end if;
 
   subtotal_value := round(subtotal_value, item_decimals);
@@ -269,6 +398,22 @@ alter table public.menu_payment_attempts
   add constraint menu_payment_attempts_status_check
   check (status in ('initiated', 'redirected', 'completed', 'failed', 'cancelled', 'manual_review')) not valid;
 
+with ranked_attempts as (
+  select id, row_number() over (partition by order_id order by created_at desc, id desc) as attempt_rank
+    from public.menu_payment_attempts
+   where status in ('initiated', 'redirected')
+)
+update public.menu_payment_attempts attempt
+   set status = 'failed',
+       failure_reason = coalesce(attempt.failure_reason, 'Superseded duplicate active checkout attempt'),
+       updated_at = now()
+  from ranked_attempts ranked
+ where ranked.id = attempt.id and ranked.attempt_rank > 1;
+
+create unique index if not exists menu_payment_attempts_one_active_per_order
+  on public.menu_payment_attempts (order_id)
+  where status in ('initiated', 'redirected');
+
 create or replace function public.create_menu_payment_attempt(
   target_order_id uuid,
   target_user_id uuid,
@@ -277,7 +422,7 @@ create or replace function public.create_menu_payment_attempt(
 returns table (attempt_id uuid, attempt_tx_ref text, attempt_status text, attempt_payment_url text)
 language plpgsql
 security definer
-set search_path = public
+set search_path = pg_catalog, public
 as $$
 declare
   selected_order public.menu_orders%rowtype;
@@ -313,7 +458,7 @@ begin
       return;
     end if;
     if selected_attempt.created_at > now() - interval '2 minutes' then
-      return query select selected_attempt.id, selected_attempt.tx_ref, selected_attempt.status, selected_attempt.payment_url;
+      return query select selected_attempt.id, selected_attempt.tx_ref, 'preparing'::text, selected_attempt.payment_url;
       return;
     end if;
     update public.menu_payment_attempts
@@ -353,7 +498,7 @@ create or replace function public.apply_menu_invoice_totals()
 returns trigger
 language plpgsql
 security definer
-set search_path = public
+set search_path = pg_catalog, public
 as $$
 declare
   selected_order public.menu_orders%rowtype;
@@ -397,7 +542,7 @@ create or replace function public.add_menu_invoice_charge_lines()
 returns trigger
 language plpgsql
 security definer
-set search_path = public
+set search_path = pg_catalog, public
 as $$
 declare
   selected_order public.menu_orders%rowtype;

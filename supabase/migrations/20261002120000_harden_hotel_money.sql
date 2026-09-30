@@ -3,12 +3,44 @@ begin;
 alter table public.hotel_bookings
   add column if not exists checkout_request jsonb;
 
+alter table public.hotel_bookings
+  drop constraint if exists hotel_bookings_secure_total_check;
+alter table public.hotel_bookings
+  add constraint hotel_bookings_secure_total_check
+  check (
+    public.checkout_currency_minor_units(currency_code) is not null
+    and nightly_subtotal >= 0 and discount_amount >= 0 and discount_amount <= nightly_subtotal
+    and taxable_subtotal = nightly_subtotal - discount_amount
+    and vat_amount >= 0 and lht_amount >= 0
+    and total_amount = round(taxable_subtotal + vat_amount + lht_amount,
+      public.checkout_currency_minor_units(currency_code))
+  ) not valid;
+
 alter table public.hotel_bookings enable row level security;
 alter table public.hotel_payment_attempts enable row level security;
 revoke all on public.hotel_bookings, public.hotel_payment_attempts from public, anon, authenticated;
 grant select on public.hotel_bookings, public.hotel_payment_attempts to authenticated;
+drop policy if exists hotel_bookings_owner_read on public.hotel_bookings;
+drop policy if exists hotel_payment_attempts_manager_read on public.hotel_payment_attempts;
 drop policy if exists hotel_bookings_owner_or_manager_select on public.hotel_bookings;
 drop policy if exists hotel_payment_attempts_owner_or_manager_select on public.hotel_payment_attempts;
+create policy hotel_bookings_owner_or_manager_select
+  on public.hotel_bookings for select to authenticated
+  using (user_id = auth.uid() or exists (
+    select 1 from public.user_profiles up
+    join public.books_memberships bm on bm.user_id = up.user_id
+    where up.user_id = auth.uid() and up.role = 'manager'
+      and bm.organization_id = hotel_bookings.organization_id and bm.role in ('owner', 'admin')
+  ));
+create policy hotel_payment_attempts_owner_or_manager_select
+  on public.hotel_payment_attempts for select to authenticated
+  using (exists (
+    select 1 from public.hotel_bookings hb
+    join public.user_profiles up on up.user_id = auth.uid() and up.role = 'manager'
+    join public.books_memberships bm on bm.user_id = up.user_id
+      and bm.organization_id = hb.organization_id and bm.role in ('owner', 'admin')
+    where hb.id = hotel_payment_attempts.booking_id
+  ));
 
 do $$
 declare constraint_row record;
@@ -31,10 +63,82 @@ begin
   ) then
     alter table public.hotel_rooms
       add constraint hotel_rooms_currency_precision_check
-      check (currency_code not in ('UGX', 'RWF') or (nightly_rate = trunc(nightly_rate) and (original_nightly_rate is null or original_nightly_rate = trunc(original_nightly_rate))));
+      check (
+        public.checkout_currency_minor_units(currency_code) is not null
+        and nightly_rate = round(nightly_rate, public.checkout_currency_minor_units(currency_code))
+        and (original_nightly_rate is null or original_nightly_rate = round(original_nightly_rate, public.checkout_currency_minor_units(currency_code)))
+      ) not valid;
   end if;
 end;
 $$;
+
+with ranked_attempts as (
+  select id, row_number() over (partition by booking_id order by created_at desc, id desc) as attempt_rank
+    from public.hotel_payment_attempts
+   where status in ('initiated', 'redirected')
+)
+update public.hotel_payment_attempts attempt
+   set status = 'failed',
+       failure_reason = coalesce(attempt.failure_reason, 'Superseded duplicate active checkout attempt'),
+       updated_at = now()
+  from ranked_attempts ranked
+ where ranked.id = attempt.id and ranked.attempt_rank > 1;
+
+create unique index if not exists hotel_payment_attempts_one_active_per_booking
+  on public.hotel_payment_attempts (booking_id)
+  where status in ('initiated', 'redirected');
+
+create or replace function public.validate_hotel_payment_attempt_total()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  selected_booking public.hotel_bookings%rowtype;
+begin
+  select * into selected_booking from public.hotel_bookings where id = new.booking_id;
+  if not found or new.amount <> selected_booking.total_amount
+     or upper(new.currency_code) <> upper(selected_booking.currency_code)
+     or new.amount <= 0 then
+    raise exception 'Hotel payment attempt does not match its stored booking total';
+  end if;
+  return new;
+end;
+$$;
+revoke all on function public.validate_hotel_payment_attempt_total() from public, anon, authenticated;
+drop trigger if exists hotel_payment_attempt_total_validation on public.hotel_payment_attempts;
+create trigger hotel_payment_attempt_total_validation
+before insert or update of booking_id, amount, currency_code on public.hotel_payment_attempts
+for each row execute function public.validate_hotel_payment_attempt_total();
+
+create table if not exists public.hotel_duplicate_payment_captures (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references public.books_organizations(id) on delete restrict,
+  booking_id uuid not null references public.hotel_bookings(id) on delete restrict,
+  payment_attempt_id uuid not null references public.hotel_payment_attempts(id) on delete restrict,
+  transaction_id text not null unique,
+  tx_ref text not null,
+  amount numeric(14,2) not null check (amount > 0),
+  currency_code char(3) not null,
+  status text not null default 'manual_review' check (status in ('manual_review', 'refunded', 'resolved')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.hotel_duplicate_payment_captures enable row level security;
+revoke all on public.hotel_duplicate_payment_captures from public, anon, authenticated;
+grant select on public.hotel_duplicate_payment_captures to authenticated;
+grant all on public.hotel_duplicate_payment_captures to service_role;
+drop policy if exists hotel_duplicate_payment_captures_manager_read on public.hotel_duplicate_payment_captures;
+create policy hotel_duplicate_payment_captures_manager_read
+  on public.hotel_duplicate_payment_captures for select to authenticated
+  using (exists (
+    select 1 from public.user_profiles up
+    join public.books_memberships bm on bm.user_id = up.user_id
+    where up.user_id = auth.uid() and up.role = 'manager'
+      and bm.organization_id = hotel_duplicate_payment_captures.organization_id and bm.role in ('owner', 'admin')
+  ));
 
 create or replace function public.create_hotel_booking(
   target_room_id uuid,
@@ -66,7 +170,7 @@ returns table (
 )
 language plpgsql
 security definer
-set search_path = public
+set search_path = pg_catalog, public
 as $$
 declare
   selected_room public.hotel_rooms%rowtype;
@@ -91,20 +195,21 @@ declare
   hold_expires timestamptz;
   request_fingerprint jsonb;
 begin
-  if target_idempotency_key is null then
+  if target_idempotency_key is null or target_guest is null or jsonb_typeof(target_guest) is distinct from 'object' then
     raise exception 'Booking request is invalid';
   end if;
 
   perform pg_advisory_xact_lock(hashtextextended(target_idempotency_key::text, 0));
 
-  if target_check_in < current_date
+  if target_check_in is null or target_check_out is null
+     or target_check_in < current_date
      or target_check_out <= target_check_in
      or target_check_out > current_date + 365 then
     raise exception 'Select valid check-in and check-out dates';
   end if;
 
-  if target_guest_count < 1
-     or target_room_count < 1
+  if target_guest_count is null or target_guest_count < 1
+     or target_room_count is null or target_room_count < 1
      or target_room_count > 10 then
     raise exception 'Guest or room count is invalid';
   end if;
@@ -115,6 +220,16 @@ begin
      or coalesce(length(trim(target_guest->>'phone')), 0) = 0 then
     raise exception 'Guest name, email, and phone are required';
   end if;
+  if length(target_guest->>'first_name') > 100
+     or length(target_guest->>'last_name') > 100
+     or length(target_guest->>'email') > 254
+     or length(target_guest->>'phone') > 40
+     or coalesce(length(target_special_requests), 0) > 2000 then
+    raise exception 'Guest details are too long';
+  end if;
+  if lower(trim(target_guest->>'email')) !~ '^[^[:space:]@]+@[^[:space:]@]+[.][^[:space:]@]+$' then
+    raise exception 'Guest email address is invalid';
+  end if;
 
   if target_access_token_hash is null
      or length(target_access_token_hash) <> 64 then
@@ -122,7 +237,7 @@ begin
   end if;
 
   if target_preferences is null
-     or jsonb_typeof(target_preferences) <> 'array' then
+     or jsonb_typeof(target_preferences) is distinct from 'array' then
     raise exception 'Room preferences must be an array';
   end if;
 
@@ -257,11 +372,8 @@ begin
   end if;
 
   nights_count := target_check_out - target_check_in;
-  currency_decimals :=
-    case
-      when trim(selected_room.currency_code) in ('UGX', 'RWF') then 0
-      else 2
-    end;
+  currency_decimals := public.checkout_currency_minor_units(selected_room.currency_code);
+  if currency_decimals is null then raise exception 'Room currency is not supported for checkout'; end if;
 
   room_subtotal := round(
     selected_room.nightly_rate * nights_count * target_room_count,
@@ -287,8 +399,10 @@ begin
   usd_per_ugx := (target_fx_rates->>'USD')::numeric;
 
   if room_currency_per_ugx is null
+     or room_currency_per_ugx::text in ('NaN', 'Infinity', '-Infinity')
      or room_currency_per_ugx <= 0
      or usd_per_ugx is null
+     or usd_per_ugx::text in ('NaN', 'Infinity', '-Infinity')
      or usd_per_ugx <= 0 then
     raise exception 'A current exchange-rate snapshot is required to calculate hotel levies';
   end if;
@@ -393,8 +507,174 @@ grant execute on function public.create_hotel_booking(
   uuid, jsonb, date, date, integer, integer, text, jsonb, uuid, uuid, text, jsonb
 ) to service_role;
 
+create or replace function public.create_hotel_payment_attempt(
+  target_booking_id uuid,
+  target_access_token_hash text,
+  target_tx_ref text
+)
+returns table (attempt_id uuid, attempt_tx_ref text, attempt_status text, attempt_payment_url text)
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  selected_booking public.hotel_bookings%rowtype;
+  selected_attempt public.hotel_payment_attempts%rowtype;
+  created_attempt public.hotel_payment_attempts%rowtype;
+begin
+  if nullif(target_tx_ref, '') is null then raise exception 'Payment reference is required'; end if;
+  select * into selected_booking
+    from public.hotel_bookings
+   where id = target_booking_id
+   for update;
+  if not found or selected_booking.access_token_hash <> target_access_token_hash then
+    raise exception 'Booking access could not be verified';
+  end if;
+  if selected_booking.booking_status <> 'pending'
+     or selected_booking.payment_status <> 'pending'
+     or selected_booking.expires_at is null
+     or selected_booking.expires_at <= now() then
+    raise exception 'This reservation hold is no longer available';
+  end if;
+  select * into selected_attempt
+    from public.hotel_payment_attempts
+   where booking_id = selected_booking.id
+     and status in ('initiated', 'redirected')
+   order by created_at desc, id desc
+   limit 1
+   for update;
+  if found then
+    if selected_attempt.status = 'redirected' and selected_attempt.payment_url is not null then
+      return query select selected_attempt.id, selected_attempt.tx_ref, selected_attempt.status, selected_attempt.payment_url;
+      return;
+    end if;
+    if selected_attempt.created_at > now() - interval '2 minutes' then
+      return query select selected_attempt.id, selected_attempt.tx_ref, 'preparing'::text, selected_attempt.payment_url;
+      return;
+    end if;
+    update public.hotel_payment_attempts
+       set status = 'failed', failure_reason = 'Checkout preparation timed out', updated_at = now()
+     where id = selected_attempt.id;
+  end if;
+  insert into public.hotel_payment_attempts (booking_id, tx_ref, amount, currency_code, status)
+  values (selected_booking.id, target_tx_ref, selected_booking.total_amount, selected_booking.currency_code, 'initiated')
+  returning * into created_attempt;
+  return query select created_attempt.id, created_attempt.tx_ref, created_attempt.status, created_attempt.payment_url;
+end;
+$$;
+
+revoke all on function public.create_hotel_payment_attempt(uuid, text, text) from public, anon, authenticated;
+grant execute on function public.create_hotel_payment_attempt(uuid, text, text) to service_role;
+
+create or replace function public.confirm_hotel_booking_payment(
+  target_tx_ref text,
+  target_transaction_id text
+)
+returns table (
+  booking_id uuid,
+  confirmation_number text,
+  payment_status text,
+  booking_status text
+)
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  attempt public.hotel_payment_attempts%rowtype;
+  booking public.hotel_bookings%rowtype;
+  room public.hotel_rooms%rowtype;
+  target_room_id uuid;
+  reserved_units integer;
+  duplicate_capture_exists boolean;
+  resolved_status text := 'confirmed';
+begin
+  if nullif(target_transaction_id, '') is null then raise exception 'Verified payment transaction ID is required'; end if;
+  select hb.room_id into target_room_id
+    from public.hotel_payment_attempts hpa
+    join public.hotel_bookings hb on hb.id = hpa.booking_id
+   where hpa.tx_ref = target_tx_ref;
+  if target_room_id is null then raise exception 'Hotel payment attempt was not found'; end if;
+  select * into room from public.hotel_rooms where id = target_room_id for update;
+  if not found then raise exception 'Hotel room was not found'; end if;
+  select * into attempt from public.hotel_payment_attempts where tx_ref = target_tx_ref for update;
+  if not found then raise exception 'Hotel payment attempt was not found'; end if;
+  select * into booking from public.hotel_bookings where id = attempt.booking_id for update;
+  if not found then raise exception 'Hotel booking was not found'; end if;
+  if attempt.amount <> booking.total_amount or upper(attempt.currency_code) <> upper(booking.currency_code) then
+    raise exception 'Payment attempt does not match booking amount';
+  end if;
+
+  if attempt.transaction_id = target_transaction_id
+     and attempt.status in ('completed', 'manual_review', 'refunded') then
+    return query select booking.id, booking.confirmation_number, booking.payment_status, booking.booking_status;
+    return;
+  end if;
+
+  select exists (
+    select 1 from public.hotel_payment_attempts other_attempt
+     where other_attempt.transaction_id = target_transaction_id
+       and other_attempt.id <> attempt.id
+  ) into duplicate_capture_exists;
+  if booking.payment_status in ('paid', 'refunded', 'partially_refunded')
+     or duplicate_capture_exists
+     or (attempt.transaction_id is not null and attempt.transaction_id <> target_transaction_id) then
+    update public.hotel_payment_attempts
+       set status = 'manual_review',
+           transaction_id = coalesce(transaction_id, target_transaction_id),
+           completed_at = coalesce(completed_at, now()),
+           failure_reason = 'An additional successful payment requires reconciliation',
+           updated_at = now()
+     where id = attempt.id;
+    insert into public.hotel_duplicate_payment_captures (
+      organization_id, booking_id, payment_attempt_id, transaction_id, tx_ref, amount, currency_code
+    ) values (
+      booking.organization_id, booking.id, attempt.id, target_transaction_id,
+      attempt.tx_ref, attempt.amount, attempt.currency_code
+    ) on conflict (transaction_id) do nothing;
+    return query select booking.id, booking.confirmation_number, 'manual_review'::text, booking.booking_status;
+    return;
+  end if;
+
+  if booking.booking_status not in ('pending', 'expired', 'cancelled') then
+    raise exception 'Hotel booking cannot be confirmed';
+  end if;
+  if booking.booking_status = 'cancelled' then resolved_status := 'manual_review'; end if;
+  update public.hotel_bookings expired_booking
+     set booking_status = 'expired', payment_status = 'cancelled'
+   where expired_booking.room_id = booking.room_id
+     and expired_booking.id <> booking.id
+     and expired_booking.booking_status = 'pending'
+     and expired_booking.expires_at <= now();
+  select coalesce(sum(reservation.room_count), 0) into reserved_units
+    from public.hotel_bookings reservation
+   where reservation.room_id = booking.room_id
+     and reservation.id <> booking.id
+     and ((reservation.booking_status in ('confirmed', 'manual_review') and reservation.payment_status = 'paid')
+       or (reservation.booking_status = 'pending' and reservation.payment_status = 'pending' and reservation.expires_at > now()))
+     and reservation.check_in < booking.check_out
+     and reservation.check_out > booking.check_in;
+  if booking.booking_status <> 'cancelled' and reserved_units + booking.room_count > room.available_units then
+    resolved_status := 'manual_review';
+  end if;
+  update public.hotel_payment_attempts
+     set status = case when resolved_status = 'manual_review' then 'manual_review' else 'completed' end,
+         transaction_id = target_transaction_id,
+         completed_at = now(),
+         updated_at = now()
+   where id = attempt.id;
+  update public.hotel_bookings
+     set payment_status = 'paid', booking_status = resolved_status, expires_at = null
+   where id = booking.id;
+  return query select booking.id, booking.confirmation_number, 'paid'::text, resolved_status;
+end;
+$$;
+
+revoke all on function public.confirm_hotel_booking_payment(text, text) from public, anon, authenticated;
+grant execute on function public.confirm_hotel_booking_payment(text, text) to service_role;
+
 create or replace function public.apply_books_invoice_tax()
-returns trigger language plpgsql security definer set search_path = public
+returns trigger language plpgsql security definer set search_path = pg_catalog, public
 as $$
 declare selected_rate numeric;
 begin
@@ -408,10 +688,17 @@ begin
        and (effective_to is null or new.issue_date <= effective_to);
     if selected_rate is null then raise exception 'Selected tax rate is not active for this invoice date'; end if;
     new.tax_rate_percentage := selected_rate;
-    new.tax_amount := case when new.invoice_number like 'HOTEL-%'
-      then round(new.subtotal * selected_rate / 100, case when trim(new.currency_code) in ('UGX', 'RWF') then 0 else 2 end)
-      else round(new.subtotal * selected_rate / 100, 4)
-    end;
+    if new.invoice_number like 'HOTEL-%' then
+      if public.checkout_currency_minor_units(new.currency_code) is null then
+        raise exception 'Hotel invoice currency is not supported';
+      end if;
+      new.tax_amount := round(
+        new.subtotal * selected_rate / 100,
+        public.checkout_currency_minor_units(new.currency_code)
+      );
+    else
+      new.tax_amount := round(new.subtotal * selected_rate / 100, 4);
+    end if;
   else
     new.tax_rate_percentage := 0;
     new.tax_amount := 0;

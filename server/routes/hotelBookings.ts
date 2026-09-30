@@ -282,6 +282,9 @@ const createPaymentSession: RequestHandler = async (request, response) => {
       response.json({ paymentUrl: active.attempt_payment_url, txRef: active.attempt_tx_ref, bookingId: booking.id });
       return;
     }
+    if (active.attempt_status === "preparing") {
+      throw new HotelBookingError("Secure checkout is already being prepared. Try again shortly.", 409);
+    }
     txRef = active.attempt_tx_ref;
     const currency = booking.currency_code.trim().toUpperCase();
     const flutterwaveResponse = await fetch(`${flutterwaveBaseUrl}/payments`, {

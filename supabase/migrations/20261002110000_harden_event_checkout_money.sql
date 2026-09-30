@@ -31,6 +31,43 @@ create policy special_event_duplicate_captures_manager_read
   on public.special_event_duplicate_captures
   for select to authenticated
   using (public.is_special_event_manager(event_id));
+grant select on public.special_event_duplicate_captures to authenticated;
+
+alter table public.special_event_bookings
+  drop constraint if exists special_event_bookings_secure_total_check;
+alter table public.special_event_bookings
+  add constraint special_event_bookings_secure_total_check
+  check (
+    public.checkout_currency_minor_units(currency) is not null
+    and subtotal >= 0 and service_fee >= 0 and tax_amount >= 0
+    and discount_amount >= 0 and discount_amount <= subtotal + service_fee + tax_amount
+    and total_amount = round(subtotal + service_fee + tax_amount - discount_amount,
+      public.checkout_currency_minor_units(currency))
+  ) not valid;
+
+create or replace function public.validate_special_event_payment_attempt_total()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  selected_booking public.special_event_bookings%rowtype;
+begin
+  select * into selected_booking from public.special_event_bookings where id = new.booking_id;
+  if not found or new.amount <> selected_booking.total_amount
+     or upper(new.currency) <> upper(selected_booking.currency)
+     or new.amount <= 0 then
+    raise exception 'Event payment attempt does not match its stored booking total';
+  end if;
+  return new;
+end;
+$$;
+revoke all on function public.validate_special_event_payment_attempt_total() from public, anon, authenticated;
+drop trigger if exists special_event_payment_attempt_total_validation on public.special_event_payment_attempts;
+create trigger special_event_payment_attempt_total_validation
+before insert or update of booking_id, amount, currency on public.special_event_payment_attempts
+for each row execute function public.validate_special_event_payment_attempt_total();
 
 drop trigger if exists special_event_ticket_price_precision on public.special_event_ticket_types;
 drop function if exists public.enforce_special_event_ticket_price_precision();
@@ -38,7 +75,7 @@ create function public.enforce_special_event_ticket_price_precision()
 returns trigger
 language plpgsql
 security definer
-set search_path = public
+set search_path = pg_catalog, public
 as $$
 declare
   selected_currency text;
@@ -46,15 +83,14 @@ begin
   select upper(trim(currency)) into selected_currency
     from public.special_events
    where id = new.event_id;
-  if selected_currency is null or selected_currency !~ '^[A-Z]{3}$' then
-    raise exception 'Event currency must be a valid three-letter currency code';
+  if public.checkout_currency_minor_units(selected_currency) is null then
+    raise exception 'Event currency is not supported for checkout';
   end if;
   if new.price::text in ('NaN', 'Infinity', '-Infinity') or new.price < 0 then
     raise exception 'Ticket price must be a finite non-negative amount';
   end if;
-  if selected_currency in ('BIF', 'CLP', 'DJF', 'GNF', 'JPY', 'KMF', 'KRW', 'PYG', 'RWF', 'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF')
-     and new.price <> trunc(new.price) then
-    raise exception 'Ticket prices in % must be whole currency units', selected_currency;
+  if new.price <> round(new.price, public.checkout_currency_minor_units(selected_currency)) then
+    raise exception 'Ticket price does not match the currency precision for %', selected_currency;
   end if;
   return new;
 end;
@@ -63,6 +99,56 @@ create trigger special_event_ticket_price_precision
 before insert or update of event_id, price on public.special_event_ticket_types
 for each row execute function public.enforce_special_event_ticket_price_precision();
 revoke all on function public.enforce_special_event_ticket_price_precision() from public, anon, authenticated;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+     where conrelid = 'public.special_events'::regclass
+       and conname = 'special_events_checkout_currency_precision_check'
+  ) then
+    alter table public.special_events
+      add constraint special_events_checkout_currency_precision_check
+      check (
+        public.checkout_currency_minor_units(currency) is not null
+        and price::text not in ('NaN', 'Infinity', '-Infinity')
+        and price >= 0
+        and price = round(price, public.checkout_currency_minor_units(currency))
+      ) not valid;
+  end if;
+end;
+$$;
+
+create or replace function public.prevent_invalid_special_event_currency_change()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  minor_units integer;
+begin
+  minor_units := public.checkout_currency_minor_units(new.currency);
+  if minor_units is null then
+    raise exception 'Event currency is not supported for checkout';
+  end if;
+  if new.price <> round(new.price, minor_units) or exists (
+    select 1
+      from public.special_event_ticket_types ticket_type
+     where ticket_type.event_id = new.id
+       and ticket_type.price <> round(ticket_type.price, minor_units)
+  ) then
+    raise exception 'Event currency change would invalidate an existing ticket price';
+  end if;
+  return new;
+end;
+$$;
+
+revoke all on function public.prevent_invalid_special_event_currency_change() from public, anon, authenticated;
+drop trigger if exists special_event_currency_precision on public.special_events;
+create trigger special_event_currency_precision
+before update of currency on public.special_events
+for each row execute function public.prevent_invalid_special_event_currency_change();
 
 create or replace function public.create_special_event_booking(
   target_event_id uuid,
@@ -81,7 +167,7 @@ create or replace function public.create_special_event_booking(
 returns table (booking_id uuid, order_number text, total_amount numeric, currency text)
 language plpgsql
 security definer
-set search_path = public
+set search_path = pg_catalog, public
 as $$
 declare
   v_user_id uuid := auth.uid();
@@ -110,6 +196,9 @@ begin
   if nullif(btrim(guest_first_name), '') is null or nullif(btrim(guest_last_name), '') is null
      or nullif(btrim(guest_email), '') is null then
     raise exception 'Guest first name, last name, and email are required';
+  end if;
+  if lower(btrim(guest_email)) !~ '^[^[:space:]@]+@[^[:space:]@]+[.][^[:space:]@]+$' then
+    raise exception 'Guest email address is invalid';
   end if;
   if length(guest_first_name) > 100 or length(guest_last_name) > 100
      or length(guest_email) > 254 or length(coalesce(guest_phone, '')) > 40
@@ -149,8 +238,10 @@ begin
      and event_id = target_event_id and is_active
    for update;
   if not found then raise exception 'Ticket type is not available'; end if;
-  if upper(v_event.currency) in ('BIF', 'CLP', 'DJF', 'GNF', 'JPY', 'KMF', 'KRW', 'PYG', 'RWF', 'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF')
-     and v_type.price <> trunc(v_type.price) then
+  v_currency_decimals := public.checkout_currency_minor_units(v_event.currency);
+  if v_currency_decimals is null then raise exception 'Event currency is not supported for checkout'; end if;
+  if v_type.price::text in ('NaN', 'Infinity', '-Infinity') or v_type.price < 0
+     or v_type.price <> round(v_type.price, v_currency_decimals) then
     raise exception 'Ticket price is not valid for the event currency';
   end if;
 
@@ -181,6 +272,10 @@ begin
          or lower(v_existing.guest_email) <> lower(btrim(guest_email))
          or v_existing.guest_first_name <> btrim(guest_first_name)
          or v_existing.guest_last_name <> btrim(guest_last_name)
+         or v_existing.guest_phone is distinct from nullif(btrim(guest_phone), '')
+         or v_existing.special_requests is distinct from nullif(btrim(special_requests), '')
+         or v_existing.attendee_names is distinct from coalesce(target_attendee_names, array_fill(concat_ws(' ', btrim(guest_first_name), btrim(guest_last_name)), array[target_quantity]))
+         or v_existing.event_invitation_id is distinct from case when v_event.is_private then target_invitation_id else null end
        )) then
       raise exception 'Checkout key was already used for different booking details';
     end if;
@@ -218,7 +313,6 @@ begin
     if v_reserved_type + target_quantity > v_type.capacity then raise exception 'Ticket type capacity exceeded'; end if;
   end if;
 
-  v_currency_decimals := case when upper(v_event.currency) in ('BIF', 'CLP', 'DJF', 'GNF', 'JPY', 'KMF', 'KRW', 'PYG', 'RWF', 'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF') then 0 else 2 end;
   v_subtotal := round(v_type.price * target_quantity, v_currency_decimals);
   v_booking_id := gen_random_uuid();
   v_order_number := 'SE-' || upper(substr(replace(v_booking_id::text, '-', ''), 1, 16));
@@ -250,13 +344,14 @@ create or replace function public.confirm_special_event_payment(
 returns table (booking_id uuid, confirmation_number text, ticket_code text, order_number text, payment_status text)
 language plpgsql
 security definer
-set search_path = public
+set search_path = pg_catalog, public
 as $$
 declare
   v_booking public.special_event_bookings%rowtype;
   v_payment public.special_event_payment_attempts%rowtype;
   v_event public.special_events%rowtype;
   existing_payment public.special_event_payments%rowtype;
+  prior_payment public.special_event_payments%rowtype;
   v_confirmation text;
   v_ticket text;
   v_remaining bigint;
@@ -284,16 +379,28 @@ begin
   select * into existing_payment
     from public.special_event_payments
    where booking_id = v_booking.id and transaction_id = target_transaction_id;
-  if found then
+  if found and not (
+    existing_payment.status = 'manual_review'
+    and v_booking.status = 'manual_review'
+    and v_booking.payment_status = 'manual_review'
+    and v_payment.status = 'verified'
+  ) then
     return query select v_booking.id, v_booking.confirmation_number, v_booking.ticket_code,
       v_booking.order_number, case when existing_payment.status = 'successful' then 'paid' else 'manual_review' end;
     return;
   end if;
 
-  if v_booking.payment_status = 'paid' and v_booking.status = 'confirmed' then
+  select * into prior_payment
+    from public.special_event_payments
+   where booking_id = v_booking.id
+   for update;
+  if (found and prior_payment.transaction_id is distinct from target_transaction_id)
+     or v_booking.payment_status in ('paid', 'refunded', 'partially_refunded')
+     or v_booking.status in ('confirmed', 'refunded') then
     update public.special_event_payment_attempts
        set status = 'manual_review',
-           failure_reason = 'A second successful payment was received for an already-paid booking',
+           transaction_id = coalesce(transaction_id, target_transaction_id),
+           failure_reason = 'An additional successful payment requires reconciliation',
            updated_at = now()
      where id = v_payment.id;
     insert into public.special_event_duplicate_captures (
@@ -383,30 +490,30 @@ create or replace function public.normalize_event_invoice_line()
 returns trigger
 language plpgsql
 security definer
-set search_path = public
+set search_path = pg_catalog, public
 as $$
 declare
   selected_booking public.special_event_bookings%rowtype;
   selected_invoice public.books_invoices%rowtype;
 begin
   select * into selected_invoice from public.books_invoices where id = new.invoice_id;
-  if left(selected_invoice.invoice_number, 6) <> 'EVENT-' then return new; end if;
+  if not found or left(selected_invoice.invoice_number, 6) <> 'EVENT-' then return new; end if;
   select * into selected_booking
     from public.special_event_bookings
    where order_number = substring(selected_invoice.invoice_number from 7);
   if not found then return new; end if;
-  update public.books_invoice_lines
-     set quantity = selected_booking.quantity,
-         unit_price = selected_booking.total_amount / selected_booking.quantity,
-         line_total = selected_booking.total_amount
-   where id = new.id;
+  if selected_invoice.subtotal <> selected_booking.total_amount then
+    raise exception 'Event invoice does not match the verified booking total';
+  end if;
+  new.quantity := 1;
+  new.unit_price := selected_booking.total_amount;
   return new;
 end;
 $$;
 revoke all on function public.normalize_event_invoice_line() from public, anon, authenticated;
 drop trigger if exists event_invoice_line_normalize on public.books_invoice_lines;
 create trigger event_invoice_line_normalize
-after insert on public.books_invoice_lines
+before insert on public.books_invoice_lines
 for each row execute function public.normalize_event_invoice_line();
 
 notify pgrst, 'reload schema';
