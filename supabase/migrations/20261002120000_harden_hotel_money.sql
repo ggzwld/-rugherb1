@@ -622,7 +622,10 @@ declare
   duplicate_capture_exists boolean;
   resolved_status text := 'confirmed';
 begin
-  if nullif(target_transaction_id, '') is null then raise exception 'Verified payment transaction ID is required'; end if;
+  if nullif(btrim(target_tx_ref), '') is null or nullif(btrim(target_transaction_id), '') is null then
+    raise exception 'Verified payment reference and transaction ID are required';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended('hotel-payment:' || target_transaction_id, 0));
   select hb.room_id into target_room_id
     from public.hotel_payment_attempts hpa
     join public.hotel_bookings hb on hb.id = hpa.booking_id
