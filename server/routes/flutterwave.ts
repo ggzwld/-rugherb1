@@ -325,10 +325,13 @@ export const prepareFlutterwaveHostedSession = async (
     const { secretKey } = getConfiguration();
     const requestedTxRef = `sheraton-${order.order_number}-${crypto.randomUUID()}`;
     const attempt = await createMenuPaymentAttempt(order, requestedTxRef);
-    txRef = attempt.attempt_tx_ref;
     if (attempt.attempt_status === "redirected" && attempt.attempt_payment_url) {
-      return { paymentUrl: attempt.attempt_payment_url, txRef, orderId: order.id };
+      return { paymentUrl: attempt.attempt_payment_url, txRef: attempt.attempt_tx_ref, orderId: order.id };
     }
+    if (attempt.attempt_status === "preparing") {
+      throw new FlutterwaveRequestError("Secure checkout is already being prepared. Try again shortly.", 409);
+    }
+    txRef = attempt.attempt_tx_ref;
     const storedAttempt = await getPaymentAttempt(txRef);
     const amount = Number(storedAttempt.amount);
     const currency = storedAttempt.currency.toUpperCase();
