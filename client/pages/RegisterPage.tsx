@@ -71,7 +71,8 @@ const RegisterPage: React.FC = () => {
     emailNotifications: true,
     smsNotifications: false,
     marketingEmails: true,
-    loyaltyProgram: true,
+    loyaltyProgram: false,
+    referralCode: new URLSearchParams(window.location.search).get("ref") || "",
   });
 
   const [errors, setErrors] = useState<{ [key: string]: string }>({});
@@ -177,6 +178,8 @@ const RegisterPage: React.FC = () => {
             service_type: formData.serviceType || null,
             service_category: formData.serviceCategory || null,
             menu_access_role: formData.menuAccessRole || null,
+            referral_code: formData.referralCode.trim().toUpperCase() || null,
+            loyalty_program: formData.loyaltyProgram,
           },
         },
       });
@@ -863,7 +866,7 @@ const RegisterPage: React.FC = () => {
             <div>
               <span className="font-medium">Loyalty Program</span>
               <p className="text-sm text-gray-600">
-                Earn points and exclusive benefits
+                Earn points on eligible purchases and approved work
               </p>
             </div>
             <Switch
@@ -872,6 +875,18 @@ const RegisterPage: React.FC = () => {
                 setFormData((prev) => ({ ...prev, loyaltyProgram: checked }))
               }
             />
+          </div>
+          <div className="space-y-2 pt-2">
+            <label htmlFor="referralCode" className="font-medium">Referral code (optional)</label>
+            <Input
+              id="referralCode"
+              autoComplete="off"
+              value={formData.referralCode}
+              onChange={(event) => setFormData((prev) => ({ ...prev, referralCode: event.target.value.toUpperCase() }))}
+              placeholder="Enter a referral code"
+              maxLength={32}
+            />
+            <p className="text-sm text-gray-600">A qualified referral earns points after the new member completes an eligible milestone.</p>
           </div>
         </div>
       </div>
@@ -942,36 +957,37 @@ const RegisterPage: React.FC = () => {
         </p>
       </div>
 
-      <div className="bg-sheraton-gold/10 border border-sheraton-gold rounded-lg p-6">
+      {formData.loyaltyProgram && <div className="bg-sheraton-gold/10 border border-sheraton-gold rounded-lg p-6">
         <div className="flex items-center justify-center space-x-2 mb-4">
           <Crown className="h-6 w-6 text-sheraton-gold" />
           <span className="text-lg font-semibold text-sheraton-navy">
-            Gold Special Status
+            Rewards Account
           </span>
         </div>
         <p className="text-gray-700 mb-4">
-          Congratulations! You've been enrolled in our loyalty program and start
-          with Gold Special status.
+          {formData.loyaltyProgram
+            ? "Your rewards account is ready. Points are earned on eligible activity and are not cash or a withdrawable wallet balance."
+            : "Your account is ready. You can enroll in rewards later from your profile."}
         </p>
         <div className="grid grid-cols-2 gap-4 text-sm">
           <div className="flex items-center space-x-2">
             <Star className="h-4 w-4 text-sheraton-gold" />
-            <span>1,000 Welcome Points</span>
+            <span>1 point per UGX 1,000 eligible spend</span>
           </div>
           <div className="flex items-center space-x-2">
             <Shield className="h-4 w-4 text-sheraton-gold" />
-            <span>Priority Support</span>
+            <span>250 referral points after qualification</span>
           </div>
           <div className="flex items-center space-x-2">
             <CreditCard className="h-4 w-4 text-sheraton-gold" />
-            <span>Room Upgrades</span>
+            <span>50 points for approved work</span>
           </div>
           <div className="flex items-center space-x-2">
             <MapPin className="h-4 w-4 text-sheraton-gold" />
-            <span>Late Checkout</span>
+            <span>Points are not cash or withdrawable</span>
           </div>
         </div>
-      </div>
+      </div>}
 
       <div className="space-y-3">
         <Link to="/profile">

@@ -59,6 +59,7 @@ const Header = () => {
   });
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [loyaltyPoints, setLoyaltyPoints] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const subscriptionRef = useRef<any>(null);
   const location = useLocation();
@@ -78,8 +79,14 @@ const Header = () => {
         if (!user || !isMounted) {
           clearCachedHomeIdentity();
           setCanManageMenu(false);
+          setLoyaltyPoints(null);
           setLoading(false);
           return;
+        }
+
+        const { data: rewardsSummary, error: rewardsError } = await supabase.rpc("get_my_loyalty_summary");
+        if (!rewardsError && isMounted) {
+          setLoyaltyPoints(Number((rewardsSummary as { availablePoints?: number } | null)?.availablePoints ?? 0));
         }
 
         const { data: profile } = await supabase
@@ -169,6 +176,7 @@ const Header = () => {
           setCanManageMenu(false);
           setNotifications([]);
           setUnreadCount(0);
+          setLoyaltyPoints(null);
           return;
         }
         setTimeout(() => {
@@ -696,7 +704,7 @@ const Header = () => {
                     variant="secondary"
                     className="ml-2 bg-white/20 text-white"
                   >
-                    1,250 pts
+                    {loyaltyPoints === null ? "Rewards" : `${loyaltyPoints.toLocaleString()} pts`}
                   </Badge>
                 </Button>
               </PopoverTrigger>

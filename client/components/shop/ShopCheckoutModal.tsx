@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
+import { supabase } from "../../lib/supabase";
 import {
   Dialog,
   DialogContent,
@@ -123,8 +124,7 @@ const ShopCheckoutModal: React.FC<ShopCheckoutModalProps> = ({
     cvv: "",
     cardName: "",
   });
-  const [loyaltyPoints, setLoyaltyPoints] = useState(2450);
-  const [usePoints, setUsePoints] = useState(false);
+  const [loyaltyPoints, setLoyaltyPoints] = useState<number | null>(null);
   const [giftMessage, setGiftMessage] = useState("");
   const [isGift, setIsGift] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -151,8 +151,22 @@ const ShopCheckoutModal: React.FC<ShopCheckoutModalProps> = ({
 
   const shippingCost = subtotal >= 100 ? 0 : shippingCosts[shippingMethod];
   const tax = subtotal * 0.08;
-  const pointsDiscount = usePoints ? Math.min(loyaltyPoints * 0.01, subtotal * 0.2) : 0;
-  const total = subtotal + shippingCost + tax - pointsDiscount;
+  const total = subtotal + shippingCost + tax;
+
+  useEffect(() => {
+    let active = true;
+    const loadRewards = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        if (active) setLoyaltyPoints(null);
+        return;
+      }
+      const { data, error } = await supabase.rpc("get_my_loyalty_summary");
+      if (!error && active) setLoyaltyPoints(Number((data as { availablePoints?: number } | null)?.availablePoints ?? 0));
+    };
+    void loadRewards();
+    return () => { active = false; };
+  }, [isOpen]);
 
   const getStepProgress = () => {
     const steps = ["cart", "shipping", "payment", "confirmation"];
@@ -276,7 +290,6 @@ const ShopCheckoutModal: React.FC<ShopCheckoutModalProps> = ({
       cvv: "",
       cardName: "",
     });
-    setUsePoints(false);
     setIsGift(false);
     setGiftMessage("");
   };
@@ -705,19 +718,14 @@ const ShopCheckoutModal: React.FC<ShopCheckoutModalProps> = ({
                       <span className="text-sm font-medium text-sheraton-navy">Available Points</span>
                       <span className="font-semibold text-sheraton-navy">{loyaltyPoints.toLocaleString()}</span>
                     </div>
-                    <div className="flex items-center justify-between mb-3">
-                      <span className="text-sm text-gray-600">Point Value</span>
-                      <span className="text-sm text-gray-600">${(loyaltyPoints * 0.01).toFixed(2)}</span>
-                    </div>
-                    <div className="flex items-center space-x-2">
-                      <Switch
-                        checked={usePoints}
-                        onCheckedChange={setUsePoints}
-                      />
-                      <label className="text-sm font-medium text-gray-700">
-                        Use loyalty points (Save up to ${Math.min(loyaltyPoints * 0.01, subtotal * 0.2).toFixed(2)})
-                      </label>
-                    </div>
+                    <p className="text-sm text-gray-600">
+                      {loyaltyPoints === null
+                        ? "Sign in to view your points balance."
+                        : `${loyaltyPoints.toLocaleString()} points available.`}
+                    </p>
+                    <p className="mt-2 text-sm text-gray-600">
+                      Points are not cash and cannot be redeemed in this shop checkout until seller settlement is supported.
+                    </p>
                   </div>
                 </div>
 
@@ -900,12 +908,6 @@ const ShopCheckoutModal: React.FC<ShopCheckoutModalProps> = ({
                   <span className="text-gray-600">Tax</span>
                   <span className="font-medium">${tax.toFixed(2)}</span>
                 </div>
-                {usePoints && pointsDiscount > 0 && (
-                  <div className="flex justify-between text-green-600">
-                    <span>Loyalty Points</span>
-                    <span>-${pointsDiscount.toFixed(2)}</span>
-                  </div>
-                )}
                 <Separator />
                 <div className="flex justify-between text-lg font-semibold text-sheraton-navy">
                   <span>Total</span>

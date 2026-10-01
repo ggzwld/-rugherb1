@@ -69,46 +69,16 @@ const ManagerReportView: React.FC<ManagerReportViewProps> = ({
 
     setIsSubmitting(true);
     try {
-      // Get the auth.users.id for the assigned provider
-      const { data: providerProfile } = await supabase
-        .from("user_profiles")
-        .select("user_id")
-        .eq("id", task.assigned_to)
-        .single();
-
-      // Update report status to approved
-      await supabase
-        .from("task_reports")
-        .update({
-          status: "approved",
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", taskReport.id);
-
-      // Update task status to completed
-      await supabase
-        .from("tasks")
-        .update({
-          status: "completed",
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", task.id);
-
-      // Create notification to the provider (use their auth.users.id)
-      if (providerProfile?.user_id) {
-        await supabase
-          .from("notifications")
-          .insert({
-            user_id: providerProfile.user_id,
-            task_id: task.id,
-            type: "task_updated",
-            message: `Your task "${task.title}" has been approved and marked complete.`,
-          });
-      }
+      const { data: pointsAwarded, error } = await supabase.rpc("approve_task_report_and_award_points", {
+        target_report_id: taskReport.id,
+      });
+      if (error) throw error;
 
       toast({
         title: "Success",
-        description: "Task approved and marked complete",
+        description: Number(pointsAwarded) > 0
+          ? `Task approved. ${Number(pointsAwarded).toLocaleString()} rewards points were added.`
+          : "Task approved and marked complete. No reward points were added for this approval.",
       });
 
       onEvidenceApproved();
