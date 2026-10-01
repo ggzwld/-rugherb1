@@ -66,6 +66,28 @@ import {
 } from "lucide-react";
 import { format, addDays } from "date-fns";
 
+type RewardsSummary = {
+  availablePoints: number;
+  lifetimePoints: number;
+  enrolled: boolean;
+  debtPoints: number;
+  referralCode: string;
+  referrals: { total: number; qualified: number; pending: number; pointsEarned: number };
+  entries: Array<{ id: string; entryType: string; pointsDelta: number; description: string; createdAt: string }>;
+  policy: {
+    pointsPer1000Ugx: number;
+    guestReferralMinimumUgx: number;
+    referrerBonusPoints: number;
+    inviteeBonusPoints: number;
+    taskApprovalPoints: number;
+    monthlyTaskPointsCap: number;
+    ugxValuePerPoint: number;
+    redemptionEnabled: boolean;
+    pointsExpire: boolean;
+    programEnabled: boolean;
+  };
+};
+
 const ServicesProfilePage = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -73,7 +95,9 @@ const ServicesProfilePage = () => {
   const [isEditing, setIsEditing] = useState(false);
   const [showPerformanceDetails, setShowPerformanceDetails] = useState(false);
   const [dataLoaded, setDataLoaded] = useState(false);
-  const [userRole, setUserRole] = useState<'manager' | 'service_provider' | null>(null);
+  const [userRole, setUserRole] = useState<'guest' | 'manager' | 'service_provider' | null>(null);
+  const [rewardsSummary, setRewardsSummary] = useState<RewardsSummary | null>(null);
+  const [rewardsLoadError, setRewardsLoadError] = useState(false);
   const saveTimeoutsRef = useRef<Record<string, NodeJS.Timeout>>({});
   const userIdRef = useRef<string | null>(null);
 
@@ -201,6 +225,14 @@ const ServicesProfilePage = () => {
           memberSince: resolvedProfile?.created_at ? resolvedProfile.created_at.split('T')[0] : new Date().toISOString().split('T')[0],
           profilePicture: resolvedProfile?.profile_picture || "",
         }));
+        const { data: rewards, error: rewardsError } = await supabase.rpc("get_my_loyalty_summary");
+        if (rewardsError) {
+          console.error("Unable to load rewards summary:", rewardsError);
+          setRewardsLoadError(true);
+        } else {
+          setRewardsSummary(rewards as RewardsSummary);
+          setRewardsLoadError(false);
+        }
         setDataLoaded(true);
       } catch (error) {
         console.error("Unable to initialize profile:", error);
@@ -248,72 +280,27 @@ const ServicesProfilePage = () => {
     ],
   };
 
-  const recentActivities = [
-    {
-      id: "1",
-      type: "completion",
-      description: "Task completed - Housekeeping Service",
-      points: "+50 pts",
-      date: "2024-01-15",
-      status: "completed",
-    },
-    {
-      id: "2",
-      type: "completion",
-      description: "Task completed - Maintenance Work",
-      points: "+75 pts",
-      date: "2024-01-14",
-      status: "completed",
-    },
-    {
-      id: "3",
-      type: "review",
-      description: "5-star review received",
-      points: "+25 pts",
-      date: "2024-01-10",
-      status: "completed",
-    },
-    {
-      id: "4",
-      type: "milestone",
-      description: "100 tasks completed milestone",
-      points: "+200 pts",
-      date: "2024-01-08",
-      status: "completed",
-    },
-    {
-      id: "5",
-      type: "referral",
-      description: "Service provider referral bonus",
-      points: "+100 pts",
-      date: "2024-01-05",
-      status: "completed",
-    },
-  ];
+  const recentActivities = (rewardsSummary?.entries || []).map((entry) => ({
+    id: entry.id,
+    type: entry.pointsDelta < 0 ? "reversal" : entry.entryType.includes("referral") ? "referral" : "earning",
+    description: entry.description,
+    points: `${entry.pointsDelta > 0 ? "+" : ""}${entry.pointsDelta.toLocaleString()} pts`,
+    date: entry.createdAt,
+    status: "posted",
+  }));
 
   const activeOpportunities = [
     {
-      id: "1",
-      title: "Maintenance Excellence Badge",
-      description: "Complete 20 maintenance tasks with 5-star ratings",
-      progress: 18,
-      total: 20,
-      type: "badge",
-      emoji: "🏆",
+      id: "task-reward",
+      title: "Manager-approved task reward",
+      description: `${rewardsSummary?.policy.taskApprovalPoints ?? 50} points per approved task, up to ${rewardsSummary?.policy.monthlyTaskPointsCap ?? 500} points each month`,
+      type: "task",
+      emoji: "✓",
     },
     {
-      id: "2",
-      title: "Service Partner Bonus",
-      description: "Earn 2% bonus on all tasks this month",
-      validUntil: "2024-02-29",
-      type: "offer",
-      emoji: "💰",
-    },
-    {
-      id: "3",
-      title: "Referral Program",
-      description: "Refer other service providers and earn 500 points each",
-      validUntil: "Ongoing",
+      id: "referral-reward",
+      title: "Qualified referral reward",
+      description: `${rewardsSummary?.policy.referrerBonusPoints ?? 250} points after the referred member qualifies`,
       type: "referral",
       emoji: "👥",
     },
@@ -321,33 +308,18 @@ const ServicesProfilePage = () => {
 
   const taskEarningActivities = [
     {
-      activity: "Standard Task Completion",
-      points: "Base rate + quality bonus",
+      activity: "Eligible purchases",
+      points: `${rewardsSummary?.policy.pointsPer1000Ugx ?? 1} point per UGX 1,000 of eligible net spend`,
+      icon: CreditCard,
+    },
+    {
+      activity: "Manager-approved tasks",
+      points: `${rewardsSummary?.policy.taskApprovalPoints ?? 50} points, capped at ${rewardsSummary?.policy.monthlyTaskPointsCap ?? 500} points per month`,
       icon: CheckCircle,
     },
     {
-      activity: "5-Star Reviews",
-      points: "+25 bonus points",
-      icon: Star,
-    },
-    {
-      activity: "On-Time Completion",
-      points: "+10 bonus points",
-      icon: Clock,
-    },
-    {
-      activity: "Milestone Achievements",
-      points: "+200 points per milestone",
-      icon: Target,
-    },
-    {
-      activity: "Professional Photos",
-      points: "+50 bonus points",
-      icon: Camera,
-    },
-    {
-      activity: "Service Provider Referrals",
-      points: "+500 bonus points",
+      activity: "Qualified referrals",
+      points: `${rewardsSummary?.policy.referrerBonusPoints ?? 250} points for each qualified referral`,
       icon: Users,
     },
   ];
@@ -356,12 +328,33 @@ const ServicesProfilePage = () => {
     setIsEditing(false);
   };
 
-  const generateServiceCode = () => {
-    return "SRVP-2024-" + userData.firstName.toUpperCase();
+  const generateServiceCode = () => rewardsSummary?.referralCode || "Loading…";
+
+  const copyServiceCode = async () => {
+    if (!rewardsSummary?.referralCode) return;
+    await navigator.clipboard.writeText(rewardsSummary.referralCode);
+    toast({ title: "Referral code copied" });
   };
 
-  const copyServiceCode = () => {
-    navigator.clipboard.writeText(generateServiceCode());
+  const shareReferralLink = async () => {
+    if (!rewardsSummary?.referralCode) return;
+    const url = `${window.location.origin}/register?ref=${encodeURIComponent(rewardsSummary.referralCode)}`;
+    if (navigator.share) {
+      await navigator.share({ title: "Join me", text: "Use my referral code when you sign up.", url });
+      return;
+    }
+    await navigator.clipboard.writeText(url);
+    toast({ title: "Referral link copied" });
+  };
+
+  const updateRewardsEnrollment = async (enrolled: boolean) => {
+    const { error } = await supabase.rpc("set_my_loyalty_enrollment", { target_enrolled: enrolled });
+    if (error) {
+      toast({ title: "Rewards preference could not be saved", description: error.message, variant: "destructive" });
+      return;
+    }
+    setRewardsSummary((current) => current ? { ...current, enrolled } : current);
+    toast({ title: enrolled ? "Rewards enrollment enabled" : "Rewards enrollment paused" });
   };
 
   return (
@@ -372,7 +365,7 @@ const ServicesProfilePage = () => {
           <div className="flex items-center justify-center mb-4">
             <Briefcase className="h-8 w-8 text-sheraton-gold mr-2" />
             <Badge className="bg-sheraton-gold text-sheraton-navy px-4 py-2">
-              {userRole === 'manager' ? 'Property Manager' : 'Service Partner'}
+              {userRole === 'manager' ? 'Property Manager' : userRole === 'guest' ? 'Guest Member' : 'Service Partner'}
             </Badge>
           </div>
           {userData.firstName && (
@@ -386,7 +379,9 @@ const ServicesProfilePage = () => {
           <p className="text-lg text-muted-foreground">
             {userRole === 'manager'
               ? 'Manage your properties and service team • Dashboard'
-              : `Your service excellence continues • ${performanceData.performanceTier} Member`
+              : userRole === 'guest'
+                ? 'Your guest profile and rewards'
+                : 'Your service profile and rewards'
             }
           </p>
         </div>
@@ -396,7 +391,7 @@ const ServicesProfilePage = () => {
           onValueChange={setActiveTab}
           className="space-y-8"
         >
-          <TabsList className="grid w-full grid-cols-2 lg:grid-cols-7 h-auto p-1">
+          <TabsList className="grid w-full grid-cols-2 lg:grid-cols-8 h-auto p-1">
             <TabsTrigger
               value="dashboard"
               className="flex items-center gap-2 py-3"
@@ -438,6 +433,10 @@ const ServicesProfilePage = () => {
             >
               <Settings className="h-4 w-4" />
               <span className="hidden sm:inline">Preferences</span>
+            </TabsTrigger>
+            <TabsTrigger value="rewards" className="flex items-center gap-2 py-3">
+              <Gift className="h-4 w-4" />
+              <span className="hidden sm:inline">Rewards</span>
             </TabsTrigger>
             <TabsTrigger
               value="referrals"
@@ -1640,6 +1639,109 @@ const ServicesProfilePage = () => {
             </Card>
           </TabsContent>
 
+          <TabsContent value="rewards" className="space-y-6">
+            {rewardsLoadError && (
+              <Card className="border-amber-300 bg-amber-50">
+                <CardContent className="pt-6 text-sm text-amber-900">
+                  Rewards data is not available yet. Apply the SQL steps in `supabase/loyalty-rewards-implementation.sql` to enable your account.
+                </CardContent>
+              </Card>
+            )}
+            {rewardsSummary && !rewardsSummary.policy.programEnabled && (
+              <Card className="border-amber-300 bg-amber-50">
+                <CardContent className="pt-6 text-sm text-amber-900">
+                  Rewards are waiting for the platform Books organization to be configured and the program to be activated. Verified awards remain queued; points are not redeemable yet.
+                </CardContent>
+              </Card>
+            )}
+            <Card>
+              <CardContent className="flex flex-col gap-4 pt-6 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h3 className="font-semibold text-sheraton-navy">Rewards enrollment</h3>
+                  <p className="text-sm text-muted-foreground">{rewardsSummary?.enrolled ? "Eligible purchases and approved activity can earn points." : "Enrollment is paused. Your existing points and history are preserved."}</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Label htmlFor="rewards-enrollment">{rewardsSummary?.enrolled ? "Enrolled" : "Not enrolled"}</Label>
+                  <Switch id="rewards-enrollment" checked={rewardsSummary?.enrolled ?? false} disabled={!rewardsSummary} onCheckedChange={updateRewardsEnrollment} />
+                </div>
+              </CardContent>
+            </Card>
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <Card className="lg:col-span-2 sheraton-gradient text-white">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Wallet className="h-5 w-5" /> Your Points Wallet
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-5">
+                  <div className="text-center">
+                    <div className="text-4xl font-bold mb-2">
+                      {(rewardsSummary?.availablePoints ?? 0).toLocaleString()}
+                    </div>
+                    <div className="text-white/80">Available points</div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4 text-center">
+                    <div>
+                      <div className="text-lg font-semibold">{(rewardsSummary?.lifetimePoints ?? 0).toLocaleString()}</div>
+                      <div className="text-xs text-white/70">Lifetime earned</div>
+                    </div>
+                    <div>
+                      <div className="text-lg font-semibold">{(rewardsSummary?.debtPoints ?? 0).toLocaleString()}</div>
+                      <div className="text-xs text-white/70">Reversed points owed</div>
+                    </div>
+                  </div>
+                  <div className="rounded-lg bg-white/15 p-3 text-sm">
+                    Points are promotional rewards, not cash, stored value, or a withdrawable wallet balance.
+                  </div>
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader><CardTitle>Referral progress</CardTitle></CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="text-center p-4 border rounded-lg">
+                    <div className="text-3xl font-bold text-sheraton-gold">{rewardsSummary?.referrals.qualified ?? 0}</div>
+                    <div className="text-sm text-muted-foreground">Qualified referrals</div>
+                  </div>
+                  <div className="text-center p-4 border rounded-lg">
+                    <div className="text-2xl font-bold text-sheraton-gold">{(rewardsSummary?.referrals.pointsEarned ?? 0).toLocaleString()}</div>
+                    <div className="text-sm text-muted-foreground">Referral points earned</div>
+                  </div>
+                  <p className="text-sm text-muted-foreground">{rewardsSummary?.referrals.pending ?? 0} referrals are waiting for a qualifying milestone.</p>
+                </CardContent>
+              </Card>
+            </div>
+            <Card>
+              <CardHeader><CardTitle className="flex items-center gap-2"><History className="h-5 w-5 text-sheraton-gold" /> Rewards activity</CardTitle></CardHeader>
+              <CardContent>
+                {recentActivities.length ? (
+                  <div className="space-y-3">
+                    {recentActivities.slice(0, 10).map((entry) => (
+                      <div key={entry.id} className="flex items-center justify-between border-b last:border-0 pb-3 last:pb-0">
+                        <div><p className="font-medium">{entry.description}</p><p className="text-sm text-muted-foreground">{format(new Date(entry.date), "MMM dd, yyyy")}</p></div>
+                        <span className={`font-semibold ${entry.points.startsWith("-") ? "text-red-600" : "text-green-600"}`}>{entry.points}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : <p className="text-sm text-muted-foreground">No rewards activity yet.</p>}
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader><CardTitle className="flex items-center gap-2"><TrendingUp className="h-5 w-5 text-sheraton-gold" /> How rewards are earned</CardTitle></CardHeader>
+              <CardContent className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {taskEarningActivities.map((activity) => (
+                  <div key={activity.activity} className="text-center p-4 border rounded-lg">
+                    <activity.icon className="h-8 w-8 mx-auto mb-2 text-sheraton-gold" />
+                    <h3 className="font-medium mb-1">{activity.activity}</h3>
+                    <p className="text-sm text-muted-foreground">{activity.points}</p>
+                  </div>
+                ))}
+                <p className="md:col-span-3 text-sm text-muted-foreground">
+                  Eligible purchase points exclude taxes, tips, and fees. Referral rewards require a verified first purchase of at least UGX {(rewardsSummary?.policy.guestReferralMinimumUgx ?? 100000).toLocaleString()} for guests, or a first approved task/listing for service partners. Points currently do not expire; redemption is disabled until merchant settlement is available.
+                </p>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
           {/* Referrals Tab */}
           <TabsContent value="referrals" className="space-y-6">
             {userRole === 'manager' ? (
@@ -1661,13 +1763,13 @@ const ServicesProfilePage = () => {
                       </p>
                       <div className="flex items-center justify-center gap-2 p-3 bg-white rounded-lg border">
                         <code className="font-mono text-lg">
-                          MGMT-2024-{userData.firstName?.toUpperCase()}
+                          {generateServiceCode()}
                         </code>
-                        <Button size="sm" onClick={copyServiceCode}>
+                        <Button size="sm" onClick={copyServiceCode} disabled={!rewardsSummary?.referralCode}>
                           <Copy className="h-4 w-4" />
                         </Button>
                       </div>
-                      <Button className="mt-4 sheraton-gradient text-white">
+                      <Button className="mt-4 sheraton-gradient text-white" onClick={shareReferralLink} disabled={!rewardsSummary?.referralCode}>
                         <Share2 className="h-4 w-4 mr-2" />
                         Share Referral Link
                       </Button>
@@ -1684,20 +1786,20 @@ const ServicesProfilePage = () => {
                         <CardContent className="space-y-3">
                           <div>
                             <div className="text-2xl font-bold text-sheraton-gold">
-                              $250 / referral
+                              {rewardsSummary?.policy.referrerBonusPoints ?? 250} points
                             </div>
                             <p className="text-xs text-muted-foreground mt-1">
-                              When they complete 5 tasks
+                              After the referred provider completes a manager-approved task
                             </p>
                           </div>
                           <ul className="space-y-2 text-sm">
                             <li className="flex items-start gap-2">
                               <CheckCircle className="h-4 w-4 text-green-500 flex-shrink-0 mt-0.5" />
-                              <span>Direct deposit bonus</span>
+                              <span>Platform-funded promotional points</span>
                             </li>
                             <li className="flex items-start gap-2">
                               <CheckCircle className="h-4 w-4 text-green-500 flex-shrink-0 mt-0.5" />
-                              <span>Priority support for referred provider</span>
+                              <span>Both accounts are credited after qualification</span>
                             </li>
                           </ul>
                         </CardContent>
@@ -1713,20 +1815,20 @@ const ServicesProfilePage = () => {
                         <CardContent className="space-y-3">
                           <div>
                             <div className="text-2xl font-bold text-sheraton-gold">
-                              $500 / referral
+                              {rewardsSummary?.policy.referrerBonusPoints ?? 250} points
                             </div>
                             <p className="text-xs text-muted-foreground mt-1">
-                              When they manage their first property
+                              After the referred manager publishes their first hotel room
                             </p>
                           </div>
                           <ul className="space-y-2 text-sm">
                             <li className="flex items-start gap-2">
                               <CheckCircle className="h-4 w-4 text-green-500 flex-shrink-0 mt-0.5" />
-                              <span>Premium payment processing</span>
+                              <span>Points are separate from cash payments</span>
                             </li>
                             <li className="flex items-start gap-2">
                               <CheckCircle className="h-4 w-4 text-green-500 flex-shrink-0 mt-0.5" />
-                              <span>Dedicated account support</span>
+                              <span>Both the referrer and new manager earn points</span>
                             </li>
                           </ul>
                         </CardContent>
@@ -1746,7 +1848,7 @@ const ServicesProfilePage = () => {
                     <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                       <div className="text-center p-4 border rounded-lg">
                         <div className="text-2xl font-bold text-sheraton-gold">
-                          12
+                          {rewardsSummary?.referrals.total ?? 0}
                         </div>
                         <div className="text-sm text-muted-foreground">
                           Total Referred
@@ -1754,23 +1856,25 @@ const ServicesProfilePage = () => {
                       </div>
                       <div className="text-center p-4 border rounded-lg">
                         <div className="text-2xl font-bold text-sheraton-gold">
-                          10
+                          {rewardsSummary?.referrals.qualified ?? 0}
                         </div>
                         <div className="text-sm text-muted-foreground">
-                          Active Users
+                          Qualified Referrals
                         </div>
                       </div>
                       <div className="text-center p-4 border rounded-lg">
                         <div className="text-2xl font-bold text-sheraton-gold">
-                          $3,500
+                          {(rewardsSummary?.referrals.pointsEarned ?? 0).toLocaleString()}
                         </div>
                         <div className="text-sm text-muted-foreground">
-                          Earned
+                          Referral Points Earned
                         </div>
                       </div>
                       <div className="text-center p-4 border rounded-lg">
                         <div className="text-2xl font-bold text-sheraton-gold">
-                          87%
+                          {rewardsSummary?.referrals.total
+                            ? `${Math.round((rewardsSummary.referrals.qualified / rewardsSummary.referrals.total) * 100)}%`
+                            : "0%"}
                         </div>
                         <div className="text-sm text-muted-foreground">
                           Conversion Rate
@@ -1805,7 +1909,7 @@ const ServicesProfilePage = () => {
                           <Copy className="h-4 w-4" />
                         </Button>
                       </div>
-                      <Button className="mt-4 sheraton-gradient text-white">
+                      <Button className="mt-4 sheraton-gradient text-white" onClick={shareReferralLink} disabled={!rewardsSummary?.referralCode}>
                         <Share2 className="h-4 w-4 mr-2" />
                         Share Referral Link
                       </Button>
@@ -1822,10 +1926,10 @@ const ServicesProfilePage = () => {
                         <CardContent className="space-y-3">
                           <div>
                             <div className="text-2xl font-bold text-sheraton-gold">
-                              500 Points
+                              {rewardsSummary?.policy.referrerBonusPoints ?? 250} Points
                             </div>
                             <p className="text-xs text-muted-foreground mt-1">
-                              When they complete their first task
+                              After the referred provider's first approved task
                             </p>
                           </div>
                           <ul className="space-y-2 text-sm">
@@ -1835,7 +1939,7 @@ const ServicesProfilePage = () => {
                             </li>
                             <li className="flex items-start gap-2">
                               <CheckCircle className="h-4 w-4 text-green-500 flex-shrink-0 mt-0.5" />
-                              <span>Instant credit on completion</span>
+                              <span>Both accounts are credited after qualification</span>
                             </li>
                           </ul>
                         </CardContent>
@@ -1851,16 +1955,16 @@ const ServicesProfilePage = () => {
                         <CardContent className="space-y-3">
                           <div>
                             <div className="text-2xl font-bold text-sheraton-gold">
-                              1,000 Points
+                              {rewardsSummary?.policy.referrerBonusPoints ?? 250} Points
                             </div>
                             <p className="text-xs text-muted-foreground mt-1">
-                              When they manage their first property
+                              After the referred manager publishes their first hotel room
                             </p>
                           </div>
                           <ul className="space-y-2 text-sm">
                             <li className="flex items-start gap-2">
                               <CheckCircle className="h-4 w-4 text-green-500 flex-shrink-0 mt-0.5" />
-                              <span>Premium bonus points</span>
+                              <span>Platform-funded promotional points</span>
                             </li>
                             <li className="flex items-start gap-2">
                               <CheckCircle className="h-4 w-4 text-green-500 flex-shrink-0 mt-0.5" />
@@ -1884,7 +1988,7 @@ const ServicesProfilePage = () => {
                     <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                       <div className="text-center p-4 border rounded-lg">
                         <div className="text-2xl font-bold text-sheraton-gold">
-                          8
+                          {rewardsSummary?.referrals.total ?? 0}
                         </div>
                         <div className="text-sm text-muted-foreground">
                           Total Referred
@@ -1892,23 +1996,25 @@ const ServicesProfilePage = () => {
                       </div>
                       <div className="text-center p-4 border rounded-lg">
                         <div className="text-2xl font-bold text-sheraton-gold">
-                          6
+                          {rewardsSummary?.referrals.qualified ?? 0}
                         </div>
                         <div className="text-sm text-muted-foreground">
-                          Active Users
+                          Qualified Referrals
                         </div>
                       </div>
                       <div className="text-center p-4 border rounded-lg">
                         <div className="text-2xl font-bold text-sheraton-gold">
-                          3,000
+                          {(rewardsSummary?.referrals.pointsEarned ?? 0).toLocaleString()}
                         </div>
                         <div className="text-sm text-muted-foreground">
-                          Points Earned
+                          Referral Points Earned
                         </div>
                       </div>
                       <div className="text-center p-4 border rounded-lg">
                         <div className="text-2xl font-bold text-sheraton-gold">
-                          75%
+                          {rewardsSummary?.referrals.total
+                            ? `${Math.round((rewardsSummary.referrals.qualified / rewardsSummary.referrals.total) * 100)}%`
+                            : "0%"}
                         </div>
                         <div className="text-sm text-muted-foreground">
                           Conversion Rate

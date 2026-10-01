@@ -127,7 +127,6 @@ const ProviderReportForm: React.FC<ProviderReportFormProps> = ({
           .insert({
             task_id: task.id,
             provider_id: currentUserProfile.id,
-            status: "in_progress",
             description,
             percentage_complete: percentage,
             last_updated_by: currentUser.id,
@@ -319,14 +318,10 @@ const ProviderReportForm: React.FC<ProviderReportFormProps> = ({
 
     setIsSubmitting(true);
     try {
-      // Update report status to completed_pending_approval
-      await supabase
-        .from("task_reports")
-        .update({
-          status: "completed_pending_approval",
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", taskReport.id);
+      const { error } = await supabase.rpc("submit_task_report_for_approval", {
+        target_report_id: taskReport.id,
+      });
+      if (error) throw error;
 
       toast({
         title: "Success",
