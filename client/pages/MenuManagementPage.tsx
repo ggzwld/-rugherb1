@@ -53,6 +53,8 @@ const MenuManagementPage = () => {
   const [isManager, setIsManager] = useState(false);
   const [pendingProviders, setPendingProviders] = useState<PendingMenuProvider[]>([]);
   const [items, setItems] = useState<MenuItem[]>([]);
+  const [hotelOrganizations, setHotelOrganizations] = useState<Array<{ id: string; name: string }>>([]);
+  const [selectedOrganizationId, setSelectedOrganizationId] = useState("");
   const [form, setForm] = useState<FormState>(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -90,6 +92,24 @@ const MenuManagementPage = () => {
           .in("menu_access_role", ["chef", "food_beverage_manager"])
           .order("created_at", { ascending: true });
         setPendingProviders((providers || []) as PendingMenuProvider[]);
+      }
+      if (manager) {
+        const { data: memberships } = await supabase
+          .from("books_memberships")
+          .select("organization_id")
+          .eq("user_id", user.id)
+          .in("role", ["owner", "admin", "manager"]);
+        const organizationIds = [...new Set((memberships || []).map((membership) => membership.organization_id))];
+        if (organizationIds.length) {
+          const { data: organizations } = await supabase
+            .from("books_organizations")
+            .select("id,name")
+            .in("id", organizationIds)
+            .order("name");
+          const choices = (organizations || []).map((organization) => ({ id: organization.id, name: organization.name }));
+          setHotelOrganizations(choices);
+          setSelectedOrganizationId(choices.length === 1 ? choices[0].id : "");
+        }
       }
       if (canManage) {
         const { data: databaseItems } = await supabase
@@ -132,10 +152,12 @@ const MenuManagementPage = () => {
   const resetForm = () => {
     setForm(emptyForm);
     setEditingId(null);
+    setSelectedOrganizationId(hotelOrganizations.length === 1 ? hotelOrganizations[0].id : "");
   };
 
   const editItem = (item: MenuItem) => {
     setEditingId(item.id);
+    setSelectedOrganizationId(item.organizationId || "");
     setForm({
       name: item.name,
       description: item.description,
@@ -232,6 +254,7 @@ const MenuManagementPage = () => {
       media_url: nextItem.mediaUrl || null,
       media_attachment_id: nextItem.mediaAttachmentId || null,
       managed_by: (await supabase.auth.getUser()).data.user?.id,
+      organization_id: selectedOrganizationId || null,
     };
 
     const databaseQuery = nextItem.databaseId
@@ -366,6 +389,15 @@ const MenuManagementPage = () => {
           </CardHeader>
           <CardContent>
             <form onSubmit={saveItem} className="grid grid-cols-1 md:grid-cols-2 gap-5">
+              {isManager && hotelOrganizations.length > 0 && (
+                <div className="space-y-2 md:col-span-2">
+                  <Label htmlFor="menu-hotel">Hotel ownership</Label>
+                  <select id="menu-hotel" value={selectedOrganizationId} onChange={(event) => setSelectedOrganizationId(event.target.value)} className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm">
+                    <option value="">Unassigned (not eligible for hotel rewards)</option>
+                    {hotelOrganizations.map((organization) => <option key={organization.id} value={organization.id}>{organization.name}</option>)}
+                  </select>
+                </div>
+              )}
               <div className="space-y-2"><Label htmlFor="name">Dish name *</Label><Input id="name" value={form.name} onChange={(e) => updateField("name", e.target.value)} required /></div>
               <div className="space-y-2"><Label htmlFor="image">Dish icon</Label><select id="image" className="w-full h-10 rounded-md border bg-background px-3 text-sm" value={form.image} onChange={(e) => updateField("image", e.target.value)}><option value="🍽️">🍽️ General dish</option><option value="🍝">🍝 Pasta</option><option value="🥩">🥩 Steak</option><option value="🦞">🦞 Seafood</option><option value="🍲">🍲 Soup</option><option value="🍕">🍕 Pizza</option><option value="🥗">🥗 Salad</option><option value="🍔">🍔 Burger</option><option value="🍰">🍰 Dessert</option><option value="🍫">🍫 Chocolate</option><option value="🍸">🍸 Cocktail</option><option value="🍉">🍉 Fruit</option><option value="☕">☕ Coffee</option></select></div>
               <div className="space-y-2"><Label htmlFor="currency">Currency</Label><select id="currency" className="w-full h-10 rounded-md border bg-background px-3 text-sm" value={form.currency} onChange={(e) => updateField("currency", e.target.value)}><option value="USD">USD — US Dollar ($)</option><option value="EUR">EUR — Euro (€)</option><option value="GBP">GBP — British Pound (£)</option><option value="CAD">CAD — Canadian Dollar ($)</option><option value="AUD">AUD — Australian Dollar ($)</option><option value="JPY">JPY — Japanese Yen (¥)</option><option value="CHF">CHF — Swiss Franc</option><option value="CNY">CNY — Chinese Yuan (¥)</option><option value="INR">INR — Indian Rupee (₹)</option><option value="RWF">RWF — Rwandan Franc</option><option value="KES">KES — Kenyan Shilling</option><option value="TZS">TZS — Tanzanian Shilling</option><option value="CDF">CDF — Congolese Franc</option><option value="UGX">UGX — Ugandan Shilling</option><option value="ZAR">ZAR — South African Rand</option><option value="AED">AED — UAE Dirham</option><option value="SGD">SGD — Singapore Dollar</option></select></div>

@@ -83,6 +83,8 @@ const TasksPage: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [currentUserProfile, setCurrentUserProfile] = useState<UserProfile | null>(null);
   const [userRole, setUserRole] = useState<"guest" | "manager" | "service_provider" | null>(null);
+  const [hotelOrganizations, setHotelOrganizations] = useState<Array<{ id: string; name: string }>>([]);
+  const [selectedTaskOrganizationId, setSelectedTaskOrganizationId] = useState("");
   const [internalStaff, setInternalStaff] = useState<any[]>([]);
   const [externalVendors, setExternalVendors] = useState<any[]>([]);
 
@@ -321,6 +323,20 @@ const TasksPage: React.FC = () => {
             profileData = fetchedProfileData;
             setCurrentUserProfile(fetchedProfileData);
             setUserRole(fetchedProfileData.role as "guest" | "manager" | "service_provider");
+            if (fetchedProfileData.role === "manager") {
+              const { data: memberships } = await supabase.from("books_memberships").select("organization_id")
+                .eq("user_id", user.id).in("role", ["owner", "admin", "manager"]);
+              const organizationIds = [...new Set((memberships || []).map((membership) => membership.organization_id))];
+              const { data: organizations } = organizationIds.length
+                ? await supabase.from("books_organizations").select("id,name").in("id", organizationIds).order("name")
+                : { data: [] };
+              const choices = (organizations || []).map((organization) => ({ id: organization.id, name: organization.name }));
+              setHotelOrganizations(choices);
+              setSelectedTaskOrganizationId(choices.length === 1 ? choices[0].id : "");
+            } else {
+              setHotelOrganizations([]);
+              setSelectedTaskOrganizationId("");
+            }
           }
         }
 
@@ -513,7 +529,8 @@ const TasksPage: React.FC = () => {
   };
 
   const handleCreateTask = async () => {
-    if (!formData.title || !formData.priority || !formData.assignmentType || !formData.assignee) {
+    if (!formData.title || !formData.priority || !formData.assignmentType || !formData.assignee
+      || (userRole === "manager" && hotelOrganizations.length > 0 && !selectedTaskOrganizationId)) {
       toast({
         title: "Validation Error",
         description: "Please fill in all required fields",
@@ -546,6 +563,7 @@ const TasksPage: React.FC = () => {
         is_from_complaint: selectedComplaint !== null,
         budget: formData.budget ? parseFloat(formData.budget) : null,
         created_by: currentUser?.id,
+        organization_id: selectedTaskOrganizationId || null,
       };
 
       const { data: createdTask, error: taskError } = await supabase
@@ -710,6 +728,9 @@ const TasksPage: React.FC = () => {
               isSubmitting={isSubmitting}
               internalStaff={internalStaff}
               externalVendors={externalVendors}
+              hotelOrganizations={hotelOrganizations}
+              selectedOrganizationId={selectedTaskOrganizationId}
+              onOrganizationChange={setSelectedTaskOrganizationId}
               onSelectComplaint={handleSelectComplaint}
               onAcceptComplaint={handleAcceptComplaint}
               onFormChange={handleFormChange}

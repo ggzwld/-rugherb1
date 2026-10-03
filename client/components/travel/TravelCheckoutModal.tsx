@@ -128,7 +128,6 @@ const TravelCheckoutModal: React.FC<TravelCheckoutModalProps> = ({
     cvv: "",
     cardName: "",
   });
-  const [loyaltyPoints, setLoyaltyPoints] = useState<number | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [orderConfirmed, setOrderConfirmed] = useState(false);
   const [bookingReference, setBookingReference] = useState("");
@@ -150,21 +149,6 @@ const TravelCheckoutModal: React.FC<TravelCheckoutModalProps> = ({
   const addOnTotal = Object.values(addOns).reduce((sum, cost) => sum + cost, 0);
   const tax = (subtotal + addOnTotal) * 0.08;
   const total = subtotal + addOnTotal + tax;
-
-  useEffect(() => {
-    let active = true;
-    const loadRewards = async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        if (active) setLoyaltyPoints(null);
-        return;
-      }
-      const { data, error } = await supabase.rpc("get_my_loyalty_summary");
-      if (!error && active) setLoyaltyPoints(Number((data as { availablePoints?: number } | null)?.availablePoints ?? 0));
-    };
-    void loadRewards();
-    return () => { active = false; };
-  }, [isOpen]);
 
   const getStepProgress = () => {
     const steps = ["experiences", "travelers", "payment", "confirmation"];
@@ -761,17 +745,8 @@ const TravelCheckoutModal: React.FC<TravelCheckoutModalProps> = ({
                 <div>
                   <h3 className="text-lg font-semibold text-sheraton-navy mb-4">Loyalty Points</h3>
                   <div className="bg-sheraton-cream rounded-lg p-4">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-sm font-medium text-sheraton-navy">Available Points</span>
-                      <span className="font-semibold text-sheraton-navy">{loyaltyPoints.toLocaleString()}</span>
-                    </div>
                     <p className="text-sm text-gray-600">
-                      {loyaltyPoints === null
-                        ? "Sign in to view your points balance."
-                        : `${loyaltyPoints.toLocaleString()} points available.`}
-                    </p>
-                    <p className="mt-2 text-sm text-gray-600">
-                      Points are not cash and cannot be redeemed in this travel checkout until seller settlement is supported.
+                      Hotel rewards belong to individual properties and are not available in this travel checkout.
                     </p>
                   </div>
                 </div>
