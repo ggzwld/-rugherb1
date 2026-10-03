@@ -4,6 +4,7 @@ export type MenuDifficulty = "low" | "medium" | "high";
 export interface MenuItem {
   id: string;
   databaseId?: string;
+  organizationId?: string | null;
   name: string;
   description: string;
   currency?: string;
@@ -152,6 +153,7 @@ export const defaultMenuItems: MenuItem[] = [
 export const menuItemFromDatabaseRow = (row: any): MenuItem => ({
   id: row.id,
   databaseId: row.id,
+  organizationId: row.organization_id || null,
   name: row.name,
   description: row.short_description || "",
   description_full: row.full_description || row.short_description || "",

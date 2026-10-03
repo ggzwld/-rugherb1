@@ -71,8 +71,8 @@ const RegisterPage: React.FC = () => {
     emailNotifications: true,
     smsNotifications: false,
     marketingEmails: true,
-    loyaltyProgram: false,
     referralCode: new URLSearchParams(window.location.search).get("ref") || "",
+    loyaltyOrganizationId: new URLSearchParams(window.location.search).get("loyaltyOrganization") || "",
   });
 
   const [errors, setErrors] = useState<{ [key: string]: string }>({});
@@ -179,7 +179,7 @@ const RegisterPage: React.FC = () => {
             service_category: formData.serviceCategory || null,
             menu_access_role: formData.menuAccessRole || null,
             referral_code: formData.referralCode.trim().toUpperCase() || null,
-            loyalty_program: formData.loyaltyProgram,
+            loyalty_organization_id: formData.loyaltyOrganizationId || null,
           },
         },
       });
@@ -862,20 +862,9 @@ const RegisterPage: React.FC = () => {
               }
             />
           </div>
-          <div className="flex items-center justify-between">
-            <div>
-              <span className="font-medium">Loyalty Program</span>
-              <p className="text-sm text-gray-600">
-                Earn points on eligible purchases and approved work
-              </p>
-            </div>
-            <Switch
-              checked={formData.loyaltyProgram}
-              onCheckedChange={(checked) =>
-                setFormData((prev) => ({ ...prev, loyaltyProgram: checked }))
-              }
-            />
-          </div>
+          <p className="text-sm text-gray-600">
+            Hotel rewards are managed separately by each property. You can choose to enroll in available hotel programs from your profile.
+          </p>
           <div className="space-y-2 pt-2">
             <label htmlFor="referralCode" className="font-medium">Referral code (optional)</label>
             <Input
@@ -956,38 +945,6 @@ const RegisterPage: React.FC = () => {
           Your account has been created successfully
         </p>
       </div>
-
-      {formData.loyaltyProgram && <div className="bg-sheraton-gold/10 border border-sheraton-gold rounded-lg p-6">
-        <div className="flex items-center justify-center space-x-2 mb-4">
-          <Crown className="h-6 w-6 text-sheraton-gold" />
-          <span className="text-lg font-semibold text-sheraton-navy">
-            Rewards Account
-          </span>
-        </div>
-        <p className="text-gray-700 mb-4">
-          {formData.loyaltyProgram
-            ? "Your rewards account is ready. Points are earned on eligible activity and are not cash or a withdrawable wallet balance."
-            : "Your account is ready. You can enroll in rewards later from your profile."}
-        </p>
-        <div className="grid grid-cols-2 gap-4 text-sm">
-          <div className="flex items-center space-x-2">
-            <Star className="h-4 w-4 text-sheraton-gold" />
-            <span>1 point per UGX 1,000 eligible spend</span>
-          </div>
-          <div className="flex items-center space-x-2">
-            <Shield className="h-4 w-4 text-sheraton-gold" />
-            <span>250 referral points after qualification</span>
-          </div>
-          <div className="flex items-center space-x-2">
-            <CreditCard className="h-4 w-4 text-sheraton-gold" />
-            <span>50 points for approved work</span>
-          </div>
-          <div className="flex items-center space-x-2">
-            <MapPin className="h-4 w-4 text-sheraton-gold" />
-            <span>Points are not cash or withdrawable</span>
-          </div>
-        </div>
-      </div>}
 
       <div className="space-y-3">
         <Link to="/profile">

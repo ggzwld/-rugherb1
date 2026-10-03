@@ -116,7 +116,7 @@ const BooksPage = () => {
         supabase.from("books_accounts").select("id,code,name,type").eq("organization_id", orgId).order("code"),
         supabase.from("books_tax_rates").select("id,name,country_code,rate_percentage").eq("organization_id", orgId).eq("is_active", true).order("name"),
         supabase.from("books_journal_transactions").select("id,transaction_date,books_journal_lines(account_id,debit,credit,currency_code)").eq("organization_id", orgId).order("transaction_date", { ascending: false }),
-        supabase.from("loyalty_books_postings").select("ledger_entry_id,amount_ugx,status,journal_transaction_id,error_message,created_at").eq("organization_id", orgId).order("created_at", { ascending: false }).limit(20),
+        supabase.from("hotel_loyalty_books_postings").select("ledger_entry_id,amount_ugx,status,journal_transaction_id,error_message,created_at").eq("organization_id", orgId).order("created_at", { ascending: false }).limit(20),
       ]);
       const results = [org, contactResult, invoiceResult, expenseResult, accountResult, taxResult, transactionResult];
       const failedResult = results.find((result) => result.error);

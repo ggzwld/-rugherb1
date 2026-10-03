@@ -102,6 +102,7 @@ type EventForm = {
   endsAt: string;
   timezone: string;
   facilityId: string;
+  organizationId: string;
   price: string;
   currency: string;
   capacity: string;
@@ -119,6 +120,7 @@ const initialEventForm: EventForm = {
   endsAt: "",
   timezone: "Africa/Kampala",
   facilityId: "",
+  organizationId: "",
   price: "0",
   currency: "UGX",
   capacity: "",
@@ -190,6 +192,7 @@ const EventsPage: React.FC = () => {
   const [proposalQueue, setProposalQueue] = useState<SpecialEventPlan[]>([]);
   const [scheduledProposals, setScheduledProposals] = useState<SpecialEventPlan[]>([]);
   const [facilities, setFacilities] = useState<Array<{ id: string; name: string }>>([]);
+  const [hotelOrganizations, setHotelOrganizations] = useState<Array<{ id: string; name: string }>>([]);
   const [proposalReviewForms, setProposalReviewForms] = useState<Record<string, ProposalReviewForm>>({});
   const [proposalReviewNotes, setProposalReviewNotes] = useState<Record<string, string>>({});
   const [inviteEmails, setInviteEmails] = useState<Record<string, string>>({});
@@ -233,6 +236,7 @@ const EventsPage: React.FC = () => {
       setProposalQueue([]);
       setScheduledProposals([]);
       setFacilities([]);
+      setHotelOrganizations([]);
       setProfileRole(null);
       return;
     }
@@ -273,6 +277,19 @@ const EventsPage: React.FC = () => {
     const role = profileResult.data?.role || null;
     setProfileRole(role);
     setFacilities((facilitiesResult.data || []) as Array<{ id: string; name: string }>);
+    if (role === "manager" || role === "admin") {
+      const { data: memberships } = await supabase.from("books_memberships").select("organization_id")
+        .eq("user_id", userId).in("role", ["owner", "admin", "manager"]);
+      const organizationIds = [...new Set((memberships || []).map((membership) => membership.organization_id))];
+      const { data: organizations } = organizationIds.length
+        ? await supabase.from("books_organizations").select("id,name").in("id", organizationIds).order("name")
+        : { data: [] };
+      const choices = (organizations || []).map((organization) => ({ id: organization.id, name: organization.name }));
+      setHotelOrganizations(choices);
+      if (choices.length === 1) setEventForm((form) => form.organizationId ? form : { ...form, organizationId: choices[0].id });
+    } else {
+      setHotelOrganizations([]);
+    }
     const reviewRows = (proposalQueueResult.data || []) as SpecialEventPlan[];
     setProposalQueue(role === "manager" || role === "admin" ? reviewRows.filter((plan) => plan.status === "submitted") : []);
     setScheduledProposals(role === "manager" || role === "admin" ? reviewRows.filter((plan) => plan.status === "scheduled") : []);
@@ -672,7 +689,7 @@ const EventsPage: React.FC = () => {
 
   const saveManagedEvent = async () => {
     if (!requireAuth() || !canManageEvents) return;
-    if (!eventForm.title.trim() || !eventForm.startsAt || !eventForm.endsAt || !eventForm.facilityId || !eventForm.price || !eventForm.capacity) {
+    if (!eventForm.title.trim() || !eventForm.startsAt || !eventForm.endsAt || !eventForm.facilityId || !eventForm.price || !eventForm.capacity || (hotelOrganizations.length > 1 && !eventForm.organizationId)) {
       setNotice("Complete the event title, dates, facility, price, and capacity.");
       return;
     }
@@ -690,6 +707,7 @@ const EventsPage: React.FC = () => {
         timezone: eventForm.timezone.trim() || "UTC",
         location: facilities.find((facility) => facility.id === eventForm.facilityId)?.name || "",
         facility_id: eventForm.facilityId,
+        organization_id: eventForm.organizationId || (hotelOrganizations.length === 1 ? hotelOrganizations[0].id : null),
         price: Number(eventForm.price),
         currency: eventForm.currency.trim().toUpperCase(),
         capacity: Number(eventForm.capacity),
@@ -720,7 +738,7 @@ const EventsPage: React.FC = () => {
 
   const editManagedEvent = (event: SpecialEvent) => {
     setEditingEventId(event.id);
-    setEventForm({ title: event.title, description: event.description || "", category: event.category || "Fine Dining", startsAt: dateTimeInputInEventZone(event.starts_at, event.timezone), endsAt: dateTimeInputInEventZone(event.ends_at, event.timezone), timezone: event.timezone, facilityId: event.facility_id || facilities.find((facility) => facility.name === event.location)?.id || "", price: String(event.price), currency: event.currency, capacity: String(event.capacity), maxTicketsPerOrder: String(event.max_tickets_per_order || 10), hostName: event.host_name || "", imageUrl: event.image_url || "", featured: event.featured });
+    setEventForm({ title: event.title, description: event.description || "", category: event.category || "Fine Dining", startsAt: dateTimeInputInEventZone(event.starts_at, event.timezone), endsAt: dateTimeInputInEventZone(event.ends_at, event.timezone), timezone: event.timezone, facilityId: event.facility_id || facilities.find((facility) => facility.name === event.location)?.id || "", organizationId: event.organization_id || "", price: String(event.price), currency: event.currency, capacity: String(event.capacity), maxTicketsPerOrder: String(event.max_tickets_per_order || 10), hostName: event.host_name || "", imageUrl: event.image_url || "", featured: event.featured });
     setActiveTab("planning");
   };
 
@@ -950,7 +968,7 @@ const EventsPage: React.FC = () => {
       <div className="text-center mb-8"><h3 className="text-2xl font-semibold text-sheraton-navy mb-2">Event Planning Tools</h3><p className="text-gray-600">Professional tools to help you plan the perfect event</p></div>
       <div className="grid md:grid-cols-2 gap-6">{planningTools.map((tool) => <div key={tool.title} className="bg-white rounded-lg shadow-md p-6 hover:shadow-lg transition-shadow"><div className="flex items-center mb-4"><div className="p-3 bg-sheraton-cream rounded-lg mr-4"><tool.icon className="h-6 w-6 text-sheraton-navy" /></div><div><h4 className="font-semibold text-sheraton-navy">{tool.title}</h4><p className="text-sm text-gray-600">{tool.description}</p></div></div><Button onClick={() => setNotice(`${tool.title} will be connected to your submitted event proposal.`)} className="w-full bg-sheraton-gold hover:bg-sheraton-gold/90 text-sheraton-navy">{tool.action}</Button></div>)}</div>
 
-      {canManageEvents && <div className="bg-white rounded-lg shadow-md p-6"><div className="flex items-center justify-between mb-4"><div><h4 className="text-lg font-semibold text-sheraton-navy">Create a Hotel Event</h4><p className="text-sm text-gray-600">This price applies only to hotel-organized events; creators set fees for their own events.</p></div>{editingEventId && <Button variant="outline" onClick={() => { setEditingEventId(null); setEventForm(initialEventForm); }}>Cancel edit</Button>}</div><div className="grid md:grid-cols-2 gap-4"><Input value={eventForm.title} onChange={(event) => setEventForm((form) => ({ ...form, title: event.target.value }))} placeholder="Event title" /><Input value={eventForm.category} onChange={(event) => setEventForm((form) => ({ ...form, category: event.target.value }))} placeholder="Category" /><Input type="datetime-local" value={eventForm.startsAt} onChange={(event) => setEventForm((form) => ({ ...form, startsAt: event.target.value }))} /><Input type="datetime-local" value={eventForm.endsAt} onChange={(event) => setEventForm((form) => ({ ...form, endsAt: event.target.value }))} /><div><label className="mb-2 block text-sm font-medium">Hotel facility</label><Select value={eventForm.facilityId} onValueChange={(facilityId) => setEventForm((form) => ({ ...form, facilityId }))}><SelectTrigger><SelectValue placeholder="Choose a venue facility" /></SelectTrigger><SelectContent>{facilities.map((facility) => <SelectItem key={facility.id} value={facility.id}>{facility.name}</SelectItem>)}</SelectContent></Select></div><Input value={eventForm.hostName} onChange={(event) => setEventForm((form) => ({ ...form, hostName: event.target.value }))} placeholder="Host name" /><div className="md:col-span-2 space-y-2"><label className="block text-sm font-medium text-gray-700">Event image (optional)</label><Input type="file" accept="image/*" disabled={isUploading} onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) void uploadEventImage(file); event.currentTarget.value = ""; }} />{isUploading && <p className="text-sm text-gray-500">Uploading to secure storage…</p>}{eventForm.imageUrl && <img src={eventForm.imageUrl} alt="Event preview" className="h-32 w-full rounded-lg object-cover" />}</div><Input type="number" min="0" step="0.01" value={eventForm.price} onChange={(event) => setEventForm((form) => ({ ...form, price: event.target.value }))} placeholder="General admission price" /><Input value={eventForm.currency} onChange={(event) => setEventForm((form) => ({ ...form, currency: event.target.value }))} placeholder="Currency, e.g. UGX" /><Input type="number" min="1" value={eventForm.capacity} onChange={(event) => setEventForm((form) => ({ ...form, capacity: event.target.value }))} placeholder="Capacity / ticket limit" /><Input type="number" min="1" max="50" value={eventForm.maxTicketsPerOrder} onChange={(event) => setEventForm((form) => ({ ...form, maxTicketsPerOrder: event.target.value }))} placeholder="Max tickets per order" /><Input value={eventForm.timezone} onChange={(event) => setEventForm((form) => ({ ...form, timezone: event.target.value }))} placeholder="Timezone, e.g. Africa/Kampala" /><Textarea className="md:col-span-2" value={eventForm.description} onChange={(event) => setEventForm((form) => ({ ...form, description: event.target.value }))} placeholder="Event description" /></div><label className="mt-4 block text-sm">Event poster (public B2 image)<Input type="file" accept="image/*" disabled={isUploading} onChange={async (change) => { const file = change.target.files?.[0]; if (!file) return; if (!file.type.startsWith("image/")) { setNotice("Choose an image file for the event poster."); return; } const uploaded = await uploadFile(file, "special-events/posters"); if (uploaded) setEventForm((form) => ({ ...form, imageUrl: uploaded.publicUrl })); else setNotice("We could not upload the event poster."); }} />{eventForm.imageUrl && <img src={eventForm.imageUrl} alt="Event poster preview" className="mt-2 h-28 rounded object-cover" />}</label><div className="mt-4 flex items-center justify-between"><span className="text-sm font-medium">Featured event</span><Switch checked={eventForm.featured} onCheckedChange={(checked) => setEventForm((form) => ({ ...form, featured: checked }))} /></div><div className="mt-4 flex gap-2"><Button disabled={isSavingPlan} onClick={() => void saveManagedEvent()} className="bg-sheraton-gold hover:bg-sheraton-gold/90 text-sheraton-navy">{isSavingPlan ? "Saving..." : editingEventId ? "Update Published Event" : "Publish Event"}</Button>{events.length > 0 && <span className="text-xs text-gray-500 self-center">Use the event cards below to view published records.</span>}</div><div className="mt-5 space-y-2">{events.map((event) => <div key={event.id} className="flex items-center justify-between rounded border p-3"><span className="text-sm font-medium text-sheraton-navy">{event.title}</span><span className="flex gap-2"><Button size="sm" variant="outline" onClick={() => editManagedEvent(event)}>Edit</Button><Button size="sm" variant="outline" onClick={() => void deleteManagedEvent(event.id)}>Cancel</Button></span></div>)}</div></div>}
+      {canManageEvents && <div className="bg-white rounded-lg shadow-md p-6"><div className="flex items-center justify-between mb-4"><div><h4 className="text-lg font-semibold text-sheraton-navy">Create a Hotel Event</h4><p className="text-sm text-gray-600">This price applies only to hotel-organized events; creators set fees for their own events.</p></div>{editingEventId && <Button variant="outline" onClick={() => { setEditingEventId(null); setEventForm(initialEventForm); }}>Cancel edit</Button>}</div><div className="grid md:grid-cols-2 gap-4"><Input value={eventForm.title} onChange={(event) => setEventForm((form) => ({ ...form, title: event.target.value }))} placeholder="Event title" /><Input value={eventForm.category} onChange={(event) => setEventForm((form) => ({ ...form, category: event.target.value }))} placeholder="Category" /><Input type="datetime-local" value={eventForm.startsAt} onChange={(event) => setEventForm((form) => ({ ...form, startsAt: event.target.value }))} /><Input type="datetime-local" value={eventForm.endsAt} onChange={(event) => setEventForm((form) => ({ ...form, endsAt: event.target.value }))} />{hotelOrganizations.length > 0 && <div><label className="mb-2 block text-sm font-medium">Hotel ownership</label><Select value={eventForm.organizationId} onValueChange={(organizationId) => setEventForm((form) => ({ ...form, organizationId }))}><SelectTrigger><SelectValue placeholder="Choose the hotel" /></SelectTrigger><SelectContent>{hotelOrganizations.map((organization) => <SelectItem key={organization.id} value={organization.id}>{organization.name}</SelectItem>)}</SelectContent></Select></div>}<div><label className="mb-2 block text-sm font-medium">Hotel facility</label><Select value={eventForm.facilityId} onValueChange={(facilityId) => setEventForm((form) => ({ ...form, facilityId }))}><SelectTrigger><SelectValue placeholder="Choose a venue facility" /></SelectTrigger><SelectContent>{facilities.map((facility) => <SelectItem key={facility.id} value={facility.id}>{facility.name}</SelectItem>)}</SelectContent></Select></div><Input value={eventForm.hostName} onChange={(event) => setEventForm((form) => ({ ...form, hostName: event.target.value }))} placeholder="Host name" /><div className="md:col-span-2 space-y-2"><label className="block text-sm font-medium text-gray-700">Event image (optional)</label><Input type="file" accept="image/*" disabled={isUploading} onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) void uploadEventImage(file); event.currentTarget.value = ""; }} />{isUploading && <p className="text-sm text-gray-500">Uploading to secure storage…</p>}{eventForm.imageUrl && <img src={eventForm.imageUrl} alt="Event preview" className="h-32 w-full rounded-lg object-cover" />}</div><Input type="number" min="0" step="0.01" value={eventForm.price} onChange={(event) => setEventForm((form) => ({ ...form, price: event.target.value }))} placeholder="General admission price" /><Input value={eventForm.currency} onChange={(event) => setEventForm((form) => ({ ...form, currency: event.target.value }))} placeholder="Currency, e.g. UGX" /><Input type="number" min="1" value={eventForm.capacity} onChange={(event) => setEventForm((form) => ({ ...form, capacity: event.target.value }))} placeholder="Capacity / ticket limit" /><Input type="number" min="1" max="50" value={eventForm.maxTicketsPerOrder} onChange={(event) => setEventForm((form) => ({ ...form, maxTicketsPerOrder: event.target.value }))} placeholder="Max tickets per order" /><Input value={eventForm.timezone} onChange={(event) => setEventForm((form) => ({ ...form, timezone: event.target.value }))} placeholder="Timezone, e.g. Africa/Kampala" /><Textarea className="md:col-span-2" value={eventForm.description} onChange={(event) => setEventForm((form) => ({ ...form, description: event.target.value }))} placeholder="Event description" /></div><label className="mt-4 block text-sm">Event poster (public B2 image)<Input type="file" accept="image/*" disabled={isUploading} onChange={async (change) => { const file = change.target.files?.[0]; if (!file) return; if (!file.type.startsWith("image/")) { setNotice("Choose an image file for the event poster."); return; } const uploaded = await uploadFile(file, "special-events/posters"); if (uploaded) setEventForm((form) => ({ ...form, imageUrl: uploaded.publicUrl })); else setNotice("We could not upload the event poster."); }} />{eventForm.imageUrl && <img src={eventForm.imageUrl} alt="Event poster preview" className="mt-2 h-28 rounded object-cover" />}</label><div className="mt-4 flex items-center justify-between"><span className="text-sm font-medium">Featured event</span><Switch checked={eventForm.featured} onCheckedChange={(checked) => setEventForm((form) => ({ ...form, featured: checked }))} /></div><div className="mt-4 flex gap-2"><Button disabled={isSavingPlan} onClick={() => void saveManagedEvent()} className="bg-sheraton-gold hover:bg-sheraton-gold/90 text-sheraton-navy">{isSavingPlan ? "Saving..." : editingEventId ? "Update Published Event" : "Publish Event"}</Button>{events.length > 0 && <span className="text-xs text-gray-500 self-center">Use the event cards below to view published records.</span>}</div><div className="mt-5 space-y-2">{events.map((event) => <div key={event.id} className="flex items-center justify-between rounded border p-3"><span className="text-sm font-medium text-sheraton-navy">{event.title}</span><span className="flex gap-2"><Button size="sm" variant="outline" onClick={() => editManagedEvent(event)}>Edit</Button><Button size="sm" variant="outline" onClick={() => void deleteManagedEvent(event.id)}>Cancel</Button></span></div>)}</div></div>}
     </div>
   );
 

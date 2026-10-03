@@ -23,6 +23,7 @@ export interface SpecialEvent {
   timezone: string;
   location: string;
   facility_id?: string | null;
+  organization_id?: string | null;
   is_private?: boolean;
   source_plan_id?: string | null;
   share_token?: string | null;

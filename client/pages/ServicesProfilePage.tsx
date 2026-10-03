@@ -67,11 +67,14 @@ import {
 import { format, addDays } from "date-fns";
 
 type RewardsSummary = {
+  organizationId: string;
+  organizationName: string;
+  programName: string;
   availablePoints: number;
   lifetimePoints: number;
   enrolled: boolean;
   debtPoints: number;
-  referralCode: string;
+  referralCode: string | null;
   referrals: { total: number; qualified: number; pending: number; pointsEarned: number };
   entries: Array<{ id: string; entryType: string; pointsDelta: number; description: string; createdAt: string }>;
   policy: {
@@ -96,7 +99,8 @@ const ServicesProfilePage = () => {
   const [showPerformanceDetails, setShowPerformanceDetails] = useState(false);
   const [dataLoaded, setDataLoaded] = useState(false);
   const [userRole, setUserRole] = useState<'guest' | 'manager' | 'service_provider' | null>(null);
-  const [rewardsSummary, setRewardsSummary] = useState<RewardsSummary | null>(null);
+  const [rewardsPrograms, setRewardsPrograms] = useState<RewardsSummary[]>([]);
+  const [selectedRewardsOrganization, setSelectedRewardsOrganization] = useState("");
   const [rewardsLoadError, setRewardsLoadError] = useState(false);
   const saveTimeoutsRef = useRef<Record<string, NodeJS.Timeout>>({});
   const userIdRef = useRef<string | null>(null);
@@ -225,12 +229,16 @@ const ServicesProfilePage = () => {
           memberSince: resolvedProfile?.created_at ? resolvedProfile.created_at.split('T')[0] : new Date().toISOString().split('T')[0],
           profilePicture: resolvedProfile?.profile_picture || "",
         }));
-        const { data: rewards, error: rewardsError } = await supabase.rpc("get_my_loyalty_summary");
+        const { data: rewards, error: rewardsError } = await supabase.rpc("get_my_hotel_loyalty_programs");
         if (rewardsError) {
-          console.error("Unable to load rewards summary:", rewardsError);
+          console.error("Unable to load hotel rewards programs:", rewardsError);
           setRewardsLoadError(true);
         } else {
-          setRewardsSummary(rewards as RewardsSummary);
+          const programs = (rewards || []) as RewardsSummary[];
+          setRewardsPrograms(programs);
+          setSelectedRewardsOrganization((current) =>
+            programs.some((program) => program.organizationId === current) ? current : programs[0]?.organizationId || "",
+          );
           setRewardsLoadError(false);
         }
         setDataLoaded(true);
@@ -279,6 +287,8 @@ const ServicesProfilePage = () => {
       "Custom partnership agreement",
     ],
   };
+
+  const rewardsSummary = rewardsPrograms.find((program) => program.organizationId === selectedRewardsOrganization) || null;
 
   const recentActivities = (rewardsSummary?.entries || []).map((entry) => ({
     id: entry.id,
@@ -338,7 +348,7 @@ const ServicesProfilePage = () => {
 
   const shareReferralLink = async () => {
     if (!rewardsSummary?.referralCode) return;
-    const url = `${window.location.origin}/register?ref=${encodeURIComponent(rewardsSummary.referralCode)}`;
+    const url = `${window.location.origin}/register?ref=${encodeURIComponent(rewardsSummary.referralCode)}&loyaltyOrganization=${encodeURIComponent(rewardsSummary.organizationId)}`;
     if (navigator.share) {
       await navigator.share({ title: "Join me", text: "Use my referral code when you sign up.", url });
       return;
@@ -348,12 +358,20 @@ const ServicesProfilePage = () => {
   };
 
   const updateRewardsEnrollment = async (enrolled: boolean) => {
-    const { error } = await supabase.rpc("set_my_loyalty_enrollment", { target_enrolled: enrolled });
+    if (!selectedRewardsOrganization) return;
+    const { error } = await supabase.rpc("set_my_hotel_loyalty_enrollment", {
+      target_organization_id: selectedRewardsOrganization,
+      target_enrolled: enrolled,
+    });
     if (error) {
       toast({ title: "Rewards preference could not be saved", description: error.message, variant: "destructive" });
       return;
     }
-    setRewardsSummary((current) => current ? { ...current, enrolled } : current);
+    const { data: programs, error: refreshError } = await supabase.rpc("get_my_hotel_loyalty_programs");
+    if (!refreshError) setRewardsPrograms((programs || []) as RewardsSummary[]);
+    else setRewardsPrograms((current) => current.map((program) =>
+      program.organizationId === selectedRewardsOrganization ? { ...program, enrolled } : program,
+    ));
     toast({ title: enrolled ? "Rewards enrollment enabled" : "Rewards enrollment paused" });
   };
 
@@ -1439,7 +1457,7 @@ const ServicesProfilePage = () => {
 
           {/* Billing Tab */}
           <TabsContent value="billing" className="space-y-6">
-            <BillingTab userRole={userRole} userData={userData} />
+            <BillingTab userRole={userRole === "guest" ? null : userRole} userData={userData} />
           </TabsContent>
 
           {/* Preferences Tab */}
@@ -1647,14 +1665,32 @@ const ServicesProfilePage = () => {
                 </CardContent>
               </Card>
             )}
-            {rewardsSummary && !rewardsSummary.policy.programEnabled && (
-              <Card className="border-amber-300 bg-amber-50">
-                <CardContent className="pt-6 text-sm text-amber-900">
-                  Rewards are waiting for the platform Books organization to be configured and the program to be activated. Verified awards remain queued; points are not redeemable yet.
-                </CardContent>
-              </Card>
+            {rewardsPrograms.length > 0 && (
+              <div className="max-w-md space-y-2">
+                <Label htmlFor="rewards-hotel">Hotel rewards account</Label>
+                <Select value={selectedRewardsOrganization} onValueChange={setSelectedRewardsOrganization}>
+                  <SelectTrigger id="rewards-hotel"><SelectValue placeholder="Choose a hotel" /></SelectTrigger>
+                  <SelectContent>
+                    {rewardsPrograms.map((program) => (
+                      <SelectItem key={program.organizationId} value={program.organizationId}>
+                        {program.organizationName} — {program.programName}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             )}
-            <Card>
+            {!rewardsLoadError && rewardsPrograms.length === 0 && (
+              <Card><CardContent className="pt-6 text-sm text-muted-foreground">
+                No hotel rewards programs are available yet. Each hotel manages its own program and balance.
+              </CardContent></Card>
+            )}
+            {rewardsSummary && !rewardsSummary.policy.programEnabled && (
+              <Card className="border-amber-300 bg-amber-50"><CardContent className="pt-6 text-sm text-amber-900">
+                This hotel rewards program is currently inactive.
+              </CardContent></Card>
+            )}
+            {rewardsSummary && <Card>
               <CardContent className="flex flex-col gap-4 pt-6 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <h3 className="font-semibold text-sheraton-navy">Rewards enrollment</h3>
@@ -1665,8 +1701,8 @@ const ServicesProfilePage = () => {
                   <Switch id="rewards-enrollment" checked={rewardsSummary?.enrolled ?? false} disabled={!rewardsSummary} onCheckedChange={updateRewardsEnrollment} />
                 </div>
               </CardContent>
-            </Card>
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            </Card>}
+            {rewardsSummary && <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <Card className="lg:col-span-2 sheraton-gradient text-white">
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2">
@@ -1709,9 +1745,9 @@ const ServicesProfilePage = () => {
                   <p className="text-sm text-muted-foreground">{rewardsSummary?.referrals.pending ?? 0} referrals are waiting for a qualifying milestone.</p>
                 </CardContent>
               </Card>
-            </div>
-            <Card>
-              <CardHeader><CardTitle className="flex items-center gap-2"><History className="h-5 w-5 text-sheraton-gold" /> Rewards activity</CardTitle></CardHeader>
+            </div>}
+            {rewardsSummary && <Card>
+              <CardHeader><CardTitle className="flex items-center gap-2"><History className="h-5 w-5 text-sheraton-gold" /> Rewards activity at {rewardsSummary.organizationName}</CardTitle></CardHeader>
               <CardContent>
                 {recentActivities.length ? (
                   <div className="space-y-3">
@@ -1724,9 +1760,9 @@ const ServicesProfilePage = () => {
                   </div>
                 ) : <p className="text-sm text-muted-foreground">No rewards activity yet.</p>}
               </CardContent>
-            </Card>
-            <Card>
-              <CardHeader><CardTitle className="flex items-center gap-2"><TrendingUp className="h-5 w-5 text-sheraton-gold" /> How rewards are earned</CardTitle></CardHeader>
+            </Card>}
+            {rewardsSummary && <Card>
+              <CardHeader><CardTitle className="flex items-center gap-2"><TrendingUp className="h-5 w-5 text-sheraton-gold" /> How rewards are earned at {rewardsSummary.organizationName}</CardTitle></CardHeader>
               <CardContent className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {taskEarningActivities.map((activity) => (
                   <div key={activity.activity} className="text-center p-4 border rounded-lg">
@@ -1739,7 +1775,7 @@ const ServicesProfilePage = () => {
                   Eligible purchase points exclude taxes, tips, and fees. Referral rewards require a verified first purchase of at least UGX {(rewardsSummary?.policy.guestReferralMinimumUgx ?? 100000).toLocaleString()} for guests, or a first approved task/listing for service partners. Points currently do not expire; redemption is disabled until merchant settlement is available.
                 </p>
               </CardContent>
-            </Card>
+            </Card>}
           </TabsContent>
 
           {/* Referrals Tab */}
