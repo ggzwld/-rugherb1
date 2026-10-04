@@ -11,7 +11,7 @@ export type DurableMenuCart = {
   items: Array<{ menu_item_id: string; quantity: number }>;
 };
 
-export const loadActiveMenuCart = async (): Promise<DurableMenuCart | null> => {
+export const loadActiveMenuCart = async (organizationId: string): Promise<DurableMenuCart | null> => {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return null;
 
@@ -19,6 +19,7 @@ export const loadActiveMenuCart = async (): Promise<DurableMenuCart | null> => {
     .from("menu_carts")
     .select("id")
     .eq("user_id", user.id)
+    .eq("organization_id", organizationId)
     .eq("status", "active")
     .maybeSingle();
 
@@ -38,6 +39,7 @@ export const loadActiveMenuCart = async (): Promise<DurableMenuCart | null> => {
 export const syncActiveMenuCart = async (
   cartId: string | null,
   items: MenuCartItemInput[],
+  organizationId: string,
 ): Promise<string> => {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error("Please sign in to save your cart.");
@@ -48,7 +50,8 @@ export const syncActiveMenuCart = async (
       .from("menu_carts")
       .select("id")
       .eq("user_id", user.id)
-      .eq("status", "active")
+    .eq("organization_id", organizationId)
+    .eq("status", "active")
       .maybeSingle();
 
     if (existingCartError) throw existingCartError;
@@ -58,7 +61,7 @@ export const syncActiveMenuCart = async (
     } else {
       const { data: createdCart, error: createCartError } = await supabase
         .from("menu_carts")
-        .insert({ user_id: user.id, status: "active" })
+        .insert({ user_id: user.id, organization_id: organizationId, status: "active" })
         .select("id")
         .single();
 

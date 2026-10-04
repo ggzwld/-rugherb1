@@ -5,6 +5,7 @@ import { supabase, Task as TaskType, Complaint, TaskResponse, TaskProposal, Todo
 import { toast } from "../hooks/use-toast";
 import { FileAttachment } from "../components/FileUploadZone";
 import { useFileUpload } from "../hooks/useFileUpload";
+import { useHotelTenant } from "../lib/hotelTenant";
 import TaskResponseModal from "../components/TaskResponseModal";
 
 // Import refactored sub-components
@@ -35,6 +36,7 @@ interface Message {
 }
 
 const TasksPage: React.FC = () => {
+  const { tenant } = useHotelTenant();
   const location = useLocation();
   const navigate = useNavigate();
   const { linkToTask, getTaskAttachments, getComplaintAttachments } = useFileUpload();
@@ -83,8 +85,6 @@ const TasksPage: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [currentUserProfile, setCurrentUserProfile] = useState<UserProfile | null>(null);
   const [userRole, setUserRole] = useState<"guest" | "manager" | "service_provider" | null>(null);
-  const [hotelOrganizations, setHotelOrganizations] = useState<Array<{ id: string; name: string }>>([]);
-  const [selectedTaskOrganizationId, setSelectedTaskOrganizationId] = useState("");
   const [internalStaff, setInternalStaff] = useState<any[]>([]);
   const [externalVendors, setExternalVendors] = useState<any[]>([]);
 
@@ -202,6 +202,7 @@ const TasksPage: React.FC = () => {
 
   // ========== SUBSCRIBE TO REALTIME UPDATES ==========
   useEffect(() => {
+    if (!tenant) return;
     // Subscribe to tasks for real-time updates
     const tasksSubscription = supabase
       .channel("tasks")
@@ -211,11 +212,13 @@ const TasksPage: React.FC = () => {
           event: "*",
           schema: "public",
           table: "tasks",
+          filter: `organization_id=eq.${tenant?.organizationId || ""}`,
         },
         () => {
           supabase
             .from("tasks")
             .select("*")
+            .eq("organization_id", tenant?.organizationId || "")
             .order("created_at", { ascending: false })
             .then(({ data }) => setTasks(data || []));
         }
@@ -293,13 +296,18 @@ const TasksPage: React.FC = () => {
       proposalsSubscription?.unsubscribe();
       todosSubscription?.unsubscribe();
     };
-  }, [currentUserProfile, userRole]);
+  }, [currentUserProfile, userRole, tenant?.organizationId]);
 
   // ========== LOAD INITIAL DATA ==========
   useEffect(() => {
     const loadData = async () => {
       try {
         setIsLoading(true);
+        if (!tenant) {
+          setTasks([]);
+          setComplaints([]);
+          return;
+        }
 
         // Get current user
         const {
@@ -323,20 +331,6 @@ const TasksPage: React.FC = () => {
             profileData = fetchedProfileData;
             setCurrentUserProfile(fetchedProfileData);
             setUserRole(fetchedProfileData.role as "guest" | "manager" | "service_provider");
-            if (fetchedProfileData.role === "manager") {
-              const { data: memberships } = await supabase.from("books_memberships").select("organization_id")
-                .eq("user_id", user.id).in("role", ["owner", "admin", "manager"]);
-              const organizationIds = [...new Set((memberships || []).map((membership) => membership.organization_id))];
-              const { data: organizations } = organizationIds.length
-                ? await supabase.from("books_organizations").select("id,name").in("id", organizationIds).order("name")
-                : { data: [] };
-              const choices = (organizations || []).map((organization) => ({ id: organization.id, name: organization.name }));
-              setHotelOrganizations(choices);
-              setSelectedTaskOrganizationId(choices.length === 1 ? choices[0].id : "");
-            } else {
-              setHotelOrganizations([]);
-              setSelectedTaskOrganizationId("");
-            }
           }
         }
 
@@ -362,6 +356,7 @@ const TasksPage: React.FC = () => {
         const { data: complaintsData, error: complaintsError } = await supabase
           .from("complaints")
           .select("*")
+          .eq("organization_id", tenant.organizationId)
           .eq("status", "open")
           .order("created_at", { ascending: false });
 
@@ -384,6 +379,7 @@ const TasksPage: React.FC = () => {
         const { data: tasksData, error: tasksError } = await supabase
           .from("tasks")
           .select("*")
+          .eq("organization_id", tenant.organizationId)
           .order("created_at", { ascending: false });
 
         if (tasksError) throw tasksError;
@@ -440,7 +436,7 @@ const TasksPage: React.FC = () => {
     };
 
     loadData();
-  }, [getTaskAttachments, getComplaintAttachments]);
+  }, [getTaskAttachments, getComplaintAttachments, tenant?.organizationId]);
 
   // ========== EVENT HANDLERS ==========
   const handleTabChange = (tab: string) => {
@@ -479,7 +475,8 @@ const TasksPage: React.FC = () => {
       const { error: updateError } = await supabase
         .from("complaints")
         .update({ status: "acknowledged" })
-        .eq("id", complaint.id);
+        .eq("id", complaint.id)
+        .eq("organization_id", tenant?.organizationId || "");
 
       if (updateError) throw updateError;
 
@@ -529,8 +526,7 @@ const TasksPage: React.FC = () => {
   };
 
   const handleCreateTask = async () => {
-    if (!formData.title || !formData.priority || !formData.assignmentType || !formData.assignee
-      || (userRole === "manager" && hotelOrganizations.length > 0 && !selectedTaskOrganizationId)) {
+    if (!tenant || !formData.title || !formData.priority || !formData.assignmentType || !formData.assignee) {
       toast({
         title: "Validation Error",
         description: "Please fill in all required fields",
@@ -563,7 +559,7 @@ const TasksPage: React.FC = () => {
         is_from_complaint: selectedComplaint !== null,
         budget: formData.budget ? parseFloat(formData.budget) : null,
         created_by: currentUser?.id,
-        organization_id: selectedTaskOrganizationId || null,
+        organization_id: tenant.organizationId,
       };
 
       const { data: createdTask, error: taskError } = await supabase
@@ -644,6 +640,7 @@ const TasksPage: React.FC = () => {
       const { data: tasksData } = await supabase
         .from("tasks")
         .select("*")
+        .eq("organization_id", tenant.organizationId)
         .order("created_at", { ascending: false });
       setTasks(tasksData || []);
 
@@ -728,9 +725,6 @@ const TasksPage: React.FC = () => {
               isSubmitting={isSubmitting}
               internalStaff={internalStaff}
               externalVendors={externalVendors}
-              hotelOrganizations={hotelOrganizations}
-              selectedOrganizationId={selectedTaskOrganizationId}
-              onOrganizationChange={setSelectedTaskOrganizationId}
               onSelectComplaint={handleSelectComplaint}
               onAcceptComplaint={handleAcceptComplaint}
               onFormChange={handleFormChange}

@@ -166,6 +166,19 @@ const dateTimeInputInEventZone = (instant: string, timezone: string) => {
   return `${values.year}-${values.month}-${values.day}T${values.hour}:${values.minute}`;
 };
 
+const postTenantEventProposal = async (path: string, body: Record<string, unknown>) => {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session?.access_token) throw new Error("Your sign-in session has expired");
+  const response = await fetch(`/api/hotel-event-proposals/${path}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${session.access_token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const result = await response.json().catch(() => null) as { planId?: string; error?: string } | null;
+  if (!response.ok) throw new Error(result?.error || "Event proposal could not be saved");
+  return result;
+};
+
 const EventsPage: React.FC = () => {
   const { tenant, loading: tenantLoading } = useHotelTenant();
   const navigate = useNavigate();
@@ -246,10 +259,10 @@ const EventsPage: React.FC = () => {
       supabase.from("user_profiles").select("role,first_name,last_name,email,phone").eq("user_id", userId).maybeSingle(),
       supabase.from("special_event_favorites").select("event_id").eq("user_id", userId),
       supabase.from("special_event_bookings").select("*").eq("user_id", userId).eq("organization_id", tenant.organizationId).order("created_at", { ascending: false }),
-      supabase.from("special_event_plans").select("*").eq("user_id", userId).order("event_date", { ascending: true }),
+      supabase.from("special_event_plans").select("*").eq("user_id", userId).eq("organization_id", tenant.organizationId).order("event_date", { ascending: true }),
       supabase.from("special_event_staff").select("event_id").eq("user_id", userId).eq("status", "active"),
       supabase.from("special_event_facilities").select("id,name").eq("is_active", true).order("display_order"),
-      supabase.from("special_event_plans").select("*").in("status", ["submitted", "scheduled"]).order("created_at", { ascending: true }),
+      supabase.from("special_event_plans").select("*").eq("organization_id", tenant.organizationId).in("status", ["submitted", "scheduled"]).order("created_at", { ascending: true }),
       supabase.from("special_event_invitations").select("id,event_plan_id,event_id,invitee_email,created_by,status").eq("created_by", userId).order("created_at", { ascending: false }),
       supabase.rpc("get_my_special_event_invitations"),
     ]);
@@ -273,12 +286,10 @@ const EventsPage: React.FC = () => {
       ? await supabase.from("special_event_tickets").select("id,booking_id,event_id,ticket_number,ticket_token,attendee_name,attendee_email,status,checked_in_at").in("booking_id", bookingRows.map((booking) => booking.id)).order("ticket_number")
       : { data: [], error: null };
     if (ticketResult.error) throw ticketResult.error;
-    const role = profileResult.data?.role || null;
     setFacilities((facilitiesResult.data || []) as Array<{ id: string; name: string }>);
-    const { data: membership } = role === "manager" || role === "admin"
-      ? await supabase.from("books_memberships").select("organization_id")
-        .eq("user_id", userId).eq("organization_id", tenant.organizationId).in("role", ["owner", "admin"]).maybeSingle()
-      : { data: null };
+    const { data: membership } = await supabase.from("books_memberships").select("organization_id")
+      .eq("user_id", userId).eq("organization_id", tenant.organizationId)
+      .in("role", ["owner", "admin", "manager"]).maybeSingle();
     const canManageTenantEvents = Boolean(tenant && membership);
     setCanManageEvents(canManageTenantEvents);
     const reviewRows = (proposalQueueResult.data || []) as SpecialEventPlan[];
@@ -610,7 +621,7 @@ const EventsPage: React.FC = () => {
     try {
       const { data: authData } = await supabase.auth.getUser();
       if (!authData.user) return;
-      const { data: planId, error } = await supabase.rpc("submit_special_event_proposal", {
+      const result = await postTenantEventProposal("submit", {
         target_plan_id: editingPlanId,
         proposal_title: planForm.title.trim(),
         proposal_description: planForm.description.trim() || null,
@@ -629,8 +640,8 @@ const EventsPage: React.FC = () => {
         proposal_entry_fee: planForm.entryType === "paid" ? Number(planForm.entryFee) : 0,
         proposal_share_manager_operations: planForm.shareManagerOperations,
       });
-      if (error) throw error;
-      pendingPlanScrollId.current = planId;
+      if (!result?.planId) throw new Error("Event proposal was not returned");
+      pendingPlanScrollId.current = result.planId;
       setEditingPlanId(null);
       setPlanForm(initialPlan);
       setNotice("Your event proposal has been sent to the hotel team for review.");
@@ -774,25 +785,27 @@ const EventsPage: React.FC = () => {
     }
     setIsSavingPlan(true);
     setNotice("");
-    const { error } = await supabase.rpc("review_special_event_proposal", {
-      target_plan_id: plan.id,
-      review_action: action,
-      suggested_values: action === "suggest_changes" ? {
-        title: suggestion.title,
-        description: suggestion.description,
-        category: suggestion.category,
-        starts_at: toEventInstant(suggestion.startsAt.slice(0, 10), suggestion.startsAt.slice(11, 16), plan.timezone),
-        ends_at: toEventInstant(suggestion.endsAt.slice(0, 10), suggestion.endsAt.slice(11, 16), plan.timezone),
-        facility_id: suggestion.facilityId,
-        expected_guests: Number(suggestion.expectedGuests),
-      } : null,
-      review_message: proposalReviewNotes[plan.id]?.trim() || null,
-    });
-    setIsSavingPlan(false);
-    if (error) {
-      setNotice(error.message);
+    try {
+      await postTenantEventProposal("review", {
+        planId: plan.id,
+        action,
+        suggestedValues: action === "suggest_changes" ? {
+          title: suggestion.title,
+          description: suggestion.description,
+          category: suggestion.category,
+          starts_at: toEventInstant(suggestion.startsAt.slice(0, 10), suggestion.startsAt.slice(11, 16), plan.timezone),
+          ends_at: toEventInstant(suggestion.endsAt.slice(0, 10), suggestion.endsAt.slice(11, 16), plan.timezone),
+          facility_id: suggestion.facilityId,
+          expected_guests: Number(suggestion.expectedGuests),
+        } : null,
+        reviewMessage: proposalReviewNotes[plan.id]?.trim() || null,
+      });
+    } catch (error) {
+      setIsSavingPlan(false);
+      setNotice(error instanceof Error ? error.message : "Event proposal could not be reviewed");
       return;
     }
+    setIsSavingPlan(false);
     setNotice(action === "approve" ? "Proposal approved and scheduled." : action === "decline" ? "Proposal declined." : "Your suggestions were sent to the proposer.");
     const { data: authData } = await supabase.auth.getUser();
     if (authData.user) await loadUserData(authData.user.id);
@@ -802,15 +815,14 @@ const EventsPage: React.FC = () => {
   const respondToProposal = async (plan: SpecialEventPlan, accept: boolean) => {
     setIsSavingPlan(true);
     setNotice("");
-    const { error } = await supabase.rpc("respond_to_special_event_proposal", {
-      target_plan_id: plan.id,
-      accept_suggestions: accept,
-    });
-    setIsSavingPlan(false);
-    if (error) {
-      setNotice(error.message);
+    try {
+      await postTenantEventProposal("respond", { planId: plan.id, acceptSuggestions: accept });
+    } catch (error) {
+      setIsSavingPlan(false);
+      setNotice(error instanceof Error ? error.message : "Event proposal response could not be saved");
       return;
     }
+    setIsSavingPlan(false);
     setNotice(accept ? "Suggested changes accepted and the event is scheduled." : "Suggested changes declined.");
     const { data: authData } = await supabase.auth.getUser();
     if (authData.user) await loadUserData(authData.user.id);
@@ -820,14 +832,14 @@ const EventsPage: React.FC = () => {
     if (!requireAuth() || !canManageEvents) return;
     setIsSavingPlan(true);
     setNotice("");
-    const { error } = await supabase.rpc("publish_special_event_proposal", {
-      target_plan_id: plan.id,
-    });
-    setIsSavingPlan(false);
-    if (error) {
-      setNotice(error.message);
+    try {
+      await postTenantEventProposal("publish", { planId: plan.id });
+    } catch (error) {
+      setIsSavingPlan(false);
+      setNotice(error instanceof Error ? error.message : "Event could not be published");
       return;
     }
+    setIsSavingPlan(false);
     setNotice("The event is now published in Hotel Events.");
     const { data: authData } = await supabase.auth.getUser();
     if (authData.user) await loadUserData(authData.user.id);

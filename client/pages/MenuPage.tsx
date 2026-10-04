@@ -4,7 +4,7 @@ import { Button } from "../components/ui/button";
 import CheckoutPage from "../components/checkout/CheckoutPage";
 import { menuItemFromDatabaseRow, MenuItem } from "../lib/menuData";
 import { supabase } from "../lib/supabase";
-import { getPendingCheckout, type ResumableMenuOrder } from "../lib/flutterwave";
+import { clearPendingCheckout, getPendingCheckout, type ResumableMenuOrder } from "../lib/flutterwave";
 import { loadActiveMenuCart, syncActiveMenuCart } from "../lib/menuCart";
 import { useHotelTenant } from "../lib/hotelTenant";
 import {
@@ -79,15 +79,17 @@ const MenuPage = () => {
   }, []);
 
   useEffect(() => {
+    if (!tenant) return;
     const pendingCheckout = getPendingCheckout();
-    if (pendingCheckout) {
+    if (pendingCheckout?.organizationId === tenant.organizationId) {
       setCart(pendingCheckout.cart);
       setShowCheckoutPage(true);
       setCartReady(true);
       return;
     }
+    if (pendingCheckout) clearPendingCheckout();
 
-    loadActiveMenuCart()
+    loadActiveMenuCart(tenant.organizationId)
       .then((savedCart) => {
         if (!savedCart) return;
         setDurableCartId(savedCart.id);
@@ -95,13 +97,13 @@ const MenuPage = () => {
       })
       .catch((error) => console.error("Unable to load saved menu cart", error))
       .finally(() => setCartReady(true));
-  }, []);
+  }, [tenant?.organizationId]);
 
   useEffect(() => {
     let active = true;
 
     const restoreUnpaidOrder = async () => {
-      if (getPendingCheckout()) return;
+      if (!tenant || getPendingCheckout()?.organizationId === tenant.organizationId) return;
 
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
@@ -109,6 +111,7 @@ const MenuPage = () => {
       const { data: order } = await supabase
         .from("menu_orders")
         .select("id, order_number, order_type, payment_method, tip_amount, points_discount")
+        .eq("organization_id", tenant.organizationId)
         .eq("user_id", user.id)
         .eq("status", "pending")
         .in("payment_status", ["pending", "cancelled", "failed"])
@@ -149,13 +152,13 @@ const MenuPage = () => {
     return () => {
       active = false;
     };
-  }, []);
+  }, [tenant?.organizationId]);
 
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
   const [menuItemsReady, setMenuItemsReady] = useState(false);
 
   useEffect(() => {
-    if (!cartReady || !menuItemsReady || menuItems.length === 0 || (!durableCartId && Object.keys(cart).length === 0)) return;
+    if (!tenant || !cartReady || !menuItemsReady || menuItems.length === 0 || (!durableCartId && Object.keys(cart).length === 0)) return;
 
     const timeout = window.setTimeout(() => {
       const items = Object.entries(cart)
@@ -165,13 +168,13 @@ const MenuPage = () => {
         })
         .filter((item): item is { menuItemId: string; quantity: number; unitPrice: number } => Boolean(item));
 
-      syncActiveMenuCart(durableCartId, items)
+      syncActiveMenuCart(durableCartId, items, tenant.organizationId)
         .then((cartId) => setDurableCartId(cartId))
         .catch((error) => console.error("Unable to save menu cart", error));
     }, 250);
 
     return () => window.clearTimeout(timeout);
-  }, [cart, cartReady, durableCartId, menuItems, menuItemsReady]);
+  }, [cart, cartReady, durableCartId, menuItems, menuItemsReady, tenant?.organizationId]);
 
   const categories = [
     { id: "all", name: "All Items", icon: Utensils },
@@ -184,6 +187,10 @@ const MenuPage = () => {
 
   useEffect(() => {
     let active = true;
+    if (!tenant) {
+      setMenuItemsReady(false);
+      return () => { active = false; };
+    }
     fetch("/api/hotel-menu-items", { cache: "no-store" })
       .then(async (response) => {
         const payload = await response.json().catch(() => null) as { items?: Record<string, unknown>[]; error?: string } | null;
@@ -193,7 +200,7 @@ const MenuPage = () => {
       .catch((error) => console.error("Unable to load tenant menu items", error))
       .finally(() => { if (active) setMenuItemsReady(true); });
     return () => { active = false; };
-  }, []);
+  }, [tenant?.organizationId]);
 
   const filteredItems = menuItems.filter((item) => {
     const matchesSearch =

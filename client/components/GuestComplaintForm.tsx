@@ -184,38 +184,30 @@ const GuestComplaintForm: React.FC<GuestComplaintFormProps> = ({
     setSubmitError(null);
 
     try {
-      // Get current user (if authenticated)
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
-      // Insert complaint into database (without attachment metadata - we'll link them separately)
-      const { data: complaintData, error: insertError } = await supabase
-        .from("complaints")
-        .insert([
-          {
-            user_id: user?.id || null,
-            guest_name: complaint.guestName,
-            email: complaint.email,
-            room_number: complaint.roomNumber,
-            complaint_type: complaint.complaintType,
-            description: complaint.description,
-            priority: complaint.priority,
-            status: "open",
-            attachments: [], // Empty array - attachments linked via complaint_attachments table
-          },
-        ])
-        .select()
-        .single();
-
-      if (insertError) {
-        throw insertError;
+      const { data: { session } } = await supabase.auth.getSession();
+      const response = await fetch("/api/hotel-complaints", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+        },
+        body: JSON.stringify({
+          guestName: complaint.guestName,
+          email: complaint.email,
+          roomNumber: complaint.roomNumber,
+          complaintType: complaint.complaintType,
+          description: complaint.description,
+          priority: complaint.priority,
+        }),
+      });
+      const result = await response.json().catch(() => null) as { complaintId?: string; error?: string } | null;
+      if (!response.ok || !result?.complaintId) {
+        throw new Error(result?.error || "Complaint could not be submitted");
       }
 
-      // Link uploaded files to the complaint
-      if (complaintData && uploadedFiles.length > 0) {
+      if (uploadedFiles.length > 0) {
         for (const file of uploadedFiles) {
-          const success = await linkToComplaint(file.attachmentId, complaintData.id);
+          const success = await linkToComplaint(file.attachmentId, result.complaintId);
           if (!success) {
             console.warn(`Failed to link attachment ${file.attachmentId} to complaint`);
           }

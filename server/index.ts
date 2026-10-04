@@ -29,9 +29,14 @@ import { createMenuOrder } from "./routes/menuOrders.js";
 import {
   getHotelTenant,
   getPublicHotelBookingData,
+  submitHotelComplaint,
   getPublicMenuItems,
   getPublicSpecialEvents,
   getTenantRoomAvailability,
+  publishHotelEventProposal,
+  respondHotelEventProposal,
+  reviewHotelEventProposal,
+  submitHotelEventProposal,
 } from "./routes/hotelTenant.js";
 
 export function createServer() {
@@ -49,9 +54,14 @@ export function createServer() {
 
   app.get("/api/demo", handleDemo);
   app.get("/api/hotel-tenant", getHotelTenant);
+  app.post("/api/hotel-complaints", submitHotelComplaint);
   app.get("/api/hotel-booking-data", getPublicHotelBookingData);
   app.get("/api/hotel-menu-items", getPublicMenuItems);
   app.get("/api/hotel-events", getPublicSpecialEvents);
+  app.post("/api/hotel-event-proposals/submit", submitHotelEventProposal);
+  app.post("/api/hotel-event-proposals/review", reviewHotelEventProposal);
+  app.post("/api/hotel-event-proposals/respond", respondHotelEventProposal);
+  app.post("/api/hotel-event-proposals/publish", publishHotelEventProposal);
   app.post("/api/hotel-availability", getTenantRoomAvailability);
   app.post("/api/special-events/bookings/create", createSpecialEventBooking);
   app.post("/api/special-events/bookings/confirm-free", confirmFreeSpecialEventBooking);
