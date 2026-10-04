@@ -94,9 +94,10 @@ const assertEventBookingTenant = async (request: Parameters<RequestHandler>[0], 
   if (booking.organization_id !== tenant.organizationId) {
     throw new SpecialEventPaymentError("This event booking is not available for this hotel", 404);
   }
+  return tenant;
 };
 
-const getReturnUrl = () => {
+const getReturnUrl = (domain: string) => {
   const value = process.env.NODE_ENV === "production"
     ? process.env.FLUTTERWAVE_RETURN_URL
     : process.env.FLUTTERWAVE_LOCAL_RETURN_URL;
@@ -105,6 +106,7 @@ const getReturnUrl = () => {
   if (parsed.protocol !== "https:" || parsed.pathname !== flutterwaveReturnPath) {
     throw new Error("Flutterwave return URL must use HTTPS and target the payment return route");
   }
+  parsed.hostname = domain;
   return parsed.toString();
 };
 
@@ -291,7 +293,7 @@ export const prepareSpecialEventPayment: RequestHandler = async (req, res) => {
     bookingId = (req.body as { bookingId?: string }).bookingId;
     if (!bookingId) throw new SpecialEventPaymentError("Booking ID is required");
     const booking = await getBooking(bookingId, req.headers.authorization);
-    await assertEventBookingTenant(req, booking);
+    const tenant = await assertEventBookingTenant(req, booking);
     if (booking.payment_status === "paid") throw new SpecialEventPaymentError("This event booking has already been paid", 409);
     if (booking.status !== "pending" || booking.payment_status !== "pending") throw new SpecialEventPaymentError("This event booking is no longer pending", 409);
     if (booking.expires_at && new Date(booking.expires_at).getTime() <= Date.now()) throw new SpecialEventPaymentError("This ticket hold has expired. Start a new booking.", 409);
@@ -334,7 +336,7 @@ export const prepareSpecialEventPayment: RequestHandler = async (req, res) => {
         amount: Number(booking.total_amount),
         currency: booking.currency,
         payment_options: "card",
-        redirect_url: getReturnUrl(),
+        redirect_url: getReturnUrl(tenant.domain),
         customer: { email: booking.guest_email, name: `${booking.guest_first_name} ${booking.guest_last_name}`.trim(), phonenumber: booking.guest_phone },
         meta: { booking_id: booking.id, order_number: booking.order_number },
         customizations: { title: "Special Events", description: `Event booking ${booking.order_number}` },

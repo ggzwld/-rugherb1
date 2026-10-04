@@ -28,10 +28,12 @@ alter table public.hotel_tenant_domains enable row level security;
 revoke all on public.hotel_tenant_settings, public.hotel_tenant_domains from public, anon, authenticated;
 grant select on public.hotel_tenant_settings, public.hotel_tenant_domains to service_role;
 
-create or replace function public.resolve_hotel_tenant(target_hostname text)
+drop function if exists public.resolve_hotel_tenant(text);
+create function public.resolve_hotel_tenant(target_hostname text)
 returns table (
   organization_id uuid,
   name text,
+  domain text,
   logo_url text,
   primary_color text,
   accent_color text
@@ -43,6 +45,7 @@ set search_path = pg_catalog, public
 as $$
   select settings.organization_id,
          settings.display_name,
+         domains.domain,
          settings.logo_url,
          settings.primary_color,
          settings.accent_color
@@ -236,20 +239,58 @@ begin
   end loop;
 end;
 $$;
+create or replace function public.can_manage_hotel_menu(target_organization_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = pg_catalog, public
+as $$
+  select exists (
+    select 1 from public.books_memberships membership
+     where membership.organization_id = target_organization_id
+       and membership.user_id = auth.uid()
+       and membership.role in ('owner', 'admin')
+  ) or exists (
+    select 1
+      from public.books_memberships membership
+      join public.user_profiles profile on profile.user_id = membership.user_id
+     where membership.organization_id = target_organization_id
+       and membership.user_id = auth.uid()
+       and membership.role = 'provider'
+       and profile.role = 'service_provider'
+       and profile.menu_access_approved
+       and profile.menu_access_role in ('chef', 'food_beverage_manager')
+  );
+$$;
+revoke all on function public.can_manage_hotel_menu(uuid) from public, anon;
+grant execute on function public.can_manage_hotel_menu(uuid) to authenticated, service_role;
+
+create or replace function public.attach_menu_item_hotel_organization()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+begin
+  if tg_op = 'UPDATE' and old.organization_id is not null and new.organization_id is distinct from old.organization_id then
+    raise exception 'Menu item hotel ownership cannot be changed';
+  end if;
+  if new.organization_id is null then
+    raise exception 'Menu item hotel ownership is required';
+  end if;
+  if not public.can_manage_hotel_menu(new.organization_id) then
+    raise exception 'Menu manager is not authorized for this hotel';
+  end if;
+  return new;
+end;
+$$;
+revoke all on function public.attach_menu_item_hotel_organization() from public, anon, authenticated;
+
 create policy menu_items_hotel_member_access on public.menu_items
   for all to authenticated
-  using (organization_id is not null and exists (
-    select 1 from public.books_memberships membership
-     where membership.organization_id = menu_items.organization_id
-       and membership.user_id = auth.uid()
-       and membership.role in ('owner', 'admin')
-  ))
-  with check (organization_id is not null and exists (
-    select 1 from public.books_memberships membership
-     where membership.organization_id = menu_items.organization_id
-       and membership.user_id = auth.uid()
-       and membership.role in ('owner', 'admin')
-  ));
+  using (organization_id is not null and public.can_manage_hotel_menu(organization_id))
+  with check (organization_id is not null and public.can_manage_hotel_menu(organization_id));
 
 create or replace function public.create_menu_order_for_tenant(
   target_organization_id uuid,
@@ -328,10 +369,19 @@ $$;
 revoke all on function public.create_menu_order_for_tenant(uuid, uuid, jsonb, text, text, numeric, jsonb, uuid, uuid) from public, anon, authenticated;
 grant execute on function public.create_menu_order_for_tenant(uuid, uuid, jsonb, text, text, numeric, jsonb, uuid, uuid) to service_role;
 
-drop policy if exists special_events_public_select on public.special_events;
-drop policy if exists special_events_manager_select on public.special_events;
-revoke select on public.special_events from anon;
-grant select on public.special_events to authenticated, service_role;
+do $$
+declare policy_row record;
+begin
+  for policy_row in
+    select policyname from pg_policies
+     where schemaname = 'public' and tablename = 'special_events'
+  loop
+    execute format('drop policy if exists %I on public.special_events', policy_row.policyname);
+  end loop;
+end;
+$$;
+revoke select on public.special_events from public, anon;
+grant select, insert, update, delete on public.special_events to authenticated, service_role;
 create policy special_events_hotel_member_or_booking_read on public.special_events
   for select to authenticated
   using (
@@ -346,10 +396,71 @@ create policy special_events_hotel_member_or_booking_read on public.special_even
        where booking.event_id = special_events.id and booking.user_id = auth.uid()
     )
   );
+create policy special_events_hotel_member_insert on public.special_events
+  for insert to authenticated
+  with check (
+    organizer_id = auth.uid() and created_by = auth.uid() and organization_id is not null
+    and exists (
+      select 1 from public.books_memberships membership
+       where membership.organization_id = special_events.organization_id
+         and membership.user_id = auth.uid()
+         and membership.role in ('owner', 'admin')
+    )
+  );
+create policy special_events_hotel_member_update on public.special_events
+  for update to authenticated
+  using (organization_id is not null and exists (
+    select 1 from public.books_memberships membership
+     where membership.organization_id = special_events.organization_id
+       and membership.user_id = auth.uid()
+       and membership.role in ('owner', 'admin')
+  ))
+  with check (organization_id is not null and exists (
+    select 1 from public.books_memberships membership
+     where membership.organization_id = special_events.organization_id
+       and membership.user_id = auth.uid()
+       and membership.role in ('owner', 'admin')
+  ));
+create policy special_events_hotel_member_delete on public.special_events
+  for delete to authenticated
+  using (organization_id is not null and exists (
+    select 1 from public.books_memberships membership
+     where membership.organization_id = special_events.organization_id
+       and membership.user_id = auth.uid()
+       and membership.role in ('owner', 'admin')
+  ));
 
 drop policy if exists special_event_ticket_types_public_select on public.special_event_ticket_types;
-revoke select on public.special_event_ticket_types from anon;
+drop policy if exists special_event_ticket_types_manager_select on public.special_event_ticket_types;
+revoke select on public.special_event_ticket_types from public, anon;
 grant select on public.special_event_ticket_types to authenticated, service_role;
+create policy special_event_ticket_types_hotel_member_select on public.special_event_ticket_types
+  for select to authenticated
+  using (exists (
+    select 1 from public.special_events event
+    join public.books_memberships membership on membership.organization_id = event.organization_id
+    where event.id = special_event_ticket_types.event_id
+      and membership.user_id = auth.uid()
+      and membership.role in ('owner', 'admin')
+  ));
+
+create or replace function public.is_special_event_manager(target_event_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = pg_catalog, public
+as $$
+  select exists (
+    select 1 from public.special_events event
+    join public.books_memberships membership on membership.organization_id = event.organization_id
+   where event.id = target_event_id
+     and membership.user_id = auth.uid()
+     and membership.role in ('owner', 'admin')
+  );
+$$;
+revoke all on function public.is_special_event_manager(uuid) from public, anon;
+grant execute on function public.is_special_event_manager(uuid) to authenticated;
 
 create or replace function public.create_special_event_booking_for_tenant(
   target_organization_id uuid,
@@ -427,11 +538,15 @@ do $$
 declare function_source text; replacement_source text; start_at integer; end_at integer;
 begin
   function_source := pg_get_functiondef('public.post_paid_menu_order_to_books_v2()'::regprocedure);
-  start_at := strpos(function_source, '  select organization_id' || E'\n' || '    into seller_organization_id' || E'\n' || '    from public.books_menu_sales_settings');
-  end_at := strpos(function_source, '  if seller_organization_id is null then' || E'\n' || '    update public.menu_orders', start_at);
-  if start_at = 0 or end_at = 0 then
+  start_at := strpos(function_source, '  select organization_id into seller_organization_id' || E'\n' || '    from public.books_menu_sales_settings where id = true;');
+  if start_at = 0 then
     raise exception 'Could not scope menu accounting to the order tenant';
   end if;
+  end_at := strpos(substr(function_source, start_at), '  if seller_organization_id is null then' || E'\n' || '    update public.menu_orders');
+  if end_at = 0 then
+    raise exception 'Could not scope menu accounting to the order tenant';
+  end if;
+  end_at := start_at + end_at - 1;
   replacement_source := substr(function_source, 1, start_at - 1)
     || '  seller_organization_id := new.organization_id;' || E'\n\n'
     || substr(function_source, end_at);

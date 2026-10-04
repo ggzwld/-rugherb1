@@ -2,18 +2,20 @@ import type { Request, RequestHandler } from "express";
 
 export type ResolvedHotelTenant = {
   organizationId: string;
+  domain: string;
   name: string;
   logoUrl: string | null;
-  primaryColor: string;
-  accentColor: string;
+  primaryColor: string | null;
+  accentColor: string | null;
 };
 
 type TenantRow = {
   organization_id: string;
   name: string;
+  domain: string;
   logo_url: string | null;
-  primary_color: string;
-  accent_color: string;
+  primary_color: string | null;
+  accent_color: string | null;
 };
 
 const configuration = () => {
@@ -55,6 +57,7 @@ export const resolveRequestHotelTenant = async (request: Request): Promise<Resol
 
   return {
     organizationId: tenant.organization_id,
+    domain: tenant.domain,
     name: tenant.name,
     logoUrl: tenant.logo_url,
     primaryColor: tenant.primary_color,
@@ -116,7 +119,8 @@ export const getPublicMenuItems: RequestHandler = async (request, response) => {
   try {
     const tenant = await resolveRequestHotelTenant(request);
     const organizationId = encodeURIComponent(tenant.organizationId);
-    const items = await readService(`menu_items?organization_id=eq.${organizationId}&is_published=eq.true&select=*&order=created_at.asc`);
+    const select = "id,organization_id,name,short_description,full_description,currency,media_type,media_url,media_attachment_id,price,original_price,category,icon,preparation_time,availability,max_availability,dietary_tags,spice_level,origin,calories,chef_note,special_offer,status_labels,is_trending,is_published,created_at";
+    const items = await readService(`menu_items?organization_id=eq.${organizationId}&is_published=eq.true&select=${select}&order=created_at.asc`);
     setPrivateTenantResponse(response);
     response.json({ tenant, items });
   } catch (error) {
@@ -140,7 +144,7 @@ export const getPublicSpecialEvents: RequestHandler = async (request, response) 
 export const getTenantRoomAvailability: RequestHandler = async (request, response) => {
   try {
     const { checkIn, checkOut } = request.body as { checkIn?: string; checkOut?: string };
-    if (!checkIn || !/^\\d{4}-\\d{2}-\\d{2}$/.test(checkIn) || !checkOut || !/^\\d{4}-\\d{2}-\\d{2}$/.test(checkOut)) {
+    if (!checkIn || !/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !checkOut || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
       response.status(400).json({ error: "Select valid check-in and check-out dates" });
       return;
     }

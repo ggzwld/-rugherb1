@@ -176,6 +176,7 @@ const assertBookingTenant = async (request: Request, booking: HotelBooking) => {
   if (booking.organization_id !== tenant.organizationId) {
     throw new HotelBookingError("This reservation is not available for this hotel", 404);
   }
+  return tenant;
 };
 
 const getAttempt = async (txRef: string) => {
@@ -184,7 +185,7 @@ const getAttempt = async (txRef: string) => {
   return rows[0];
 };
 
-const getReturnUrl = () => {
+const getReturnUrl = (domain: string) => {
   const configuredUrl = process.env.NODE_ENV === "production"
     ? process.env.FLUTTERWAVE_RETURN_URL
     : process.env.FLUTTERWAVE_LOCAL_RETURN_URL;
@@ -193,6 +194,7 @@ const getReturnUrl = () => {
   if (url.protocol !== "https:" || url.pathname !== "/checkout/flutterwave-return") {
     throw new Error("Flutterwave return URL must use HTTPS and target the payment return route");
   }
+  url.hostname = domain;
   url.searchParams.set("flow", "hotel");
   return url.toString();
 };
@@ -287,7 +289,7 @@ const createPaymentSession: RequestHandler = async (request, response) => {
     const { bookingId, accessToken } = request.body as { bookingId?: string; accessToken?: string };
     if (!bookingId || !accessToken) throw new HotelBookingError("Booking access is required");
     const booking = await getBooking(bookingId);
-    await assertBookingTenant(request, booking);
+    const tenant = await assertBookingTenant(request, booking);
     const tokenHash = createHash("sha256").update(accessToken).digest("hex");
     if (tokenHash !== booking.access_token_hash) throw new HotelBookingError("Booking access could not be verified", 403);
     if (booking.payment_status === "paid") throw new HotelBookingError("This reservation is already paid", 409);
@@ -324,7 +326,7 @@ const createPaymentSession: RequestHandler = async (request, response) => {
         amount: Number(booking.total_amount),
         currency,
         payment_options: currency === "UGX" ? "card, mobilemoneyuganda" : "card",
-        redirect_url: getReturnUrl(),
+        redirect_url: getReturnUrl(tenant.domain),
         customer: {
           email: booking.guest_email,
           name: `${booking.guest_first_name} ${booking.guest_last_name}`.trim(),

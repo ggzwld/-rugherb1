@@ -43,6 +43,7 @@ import {
 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { supabase, Notification } from "../../lib/supabase";
+import { useHotelTenant } from "../../lib/hotelTenant";
 import { toast } from "../../hooks/use-toast";
 import {
   cacheHomeIdentity,
@@ -51,6 +52,7 @@ import {
 } from "../../lib/homeIdentity";
 
 const Header = () => {
+  const { tenant } = useHotelTenant();
   const [isOpen, setIsOpen] = useState(false);
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
   const [isAccountOpen, setIsAccountOpen] = useState(false);
@@ -416,10 +418,10 @@ const Header = () => {
       <div className="mx-auto flex h-16 w-full max-w-screen-2xl items-center px-4 sm:px-6 lg:px-8">
         <div className="mr-4 hidden min-w-0 md:flex">
           <Link to="/" className="mr-6 flex items-center space-x-2">
-            <Crown className="h-8 w-8 text-sheraton-gold" />
+            {tenant?.logoUrl ? <img src={tenant.logoUrl} alt="" className="h-8 w-8 rounded object-contain" /> : <Crown className="h-8 w-8 text-sheraton-gold" />}
             <div className="flex flex-col">
               <span className="text-xl font-bold text-sheraton-navy">
-                Sheraton
+                {tenant?.name || "Hospitality"}
               </span>
               <span className="text-xs text-sheraton-gold font-medium tracking-wide">
                 SPECIAL
@@ -513,10 +515,10 @@ const Header = () => {
               className="flex items-center space-x-2"
               onClick={() => setIsOpen(false)}
             >
-              <Crown className="h-6 w-6 text-sheraton-gold" />
+              {tenant?.logoUrl ? <img src={tenant.logoUrl} alt="" className="h-6 w-6 rounded object-contain" /> : <Crown className="h-6 w-6 text-sheraton-gold" />}
               <div className="flex flex-col">
                 <span className="text-lg font-bold text-sheraton-navy">
-                  Sheraton
+                  {tenant?.name || "Hospitality"}
                 </span>
                 <span className="text-xs text-sheraton-gold font-medium tracking-wide">
                   SPECIAL

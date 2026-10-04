@@ -6,6 +6,7 @@ import { menuItemFromDatabaseRow, MenuItem } from "../lib/menuData";
 import { supabase } from "../lib/supabase";
 import { getPendingCheckout, type ResumableMenuOrder } from "../lib/flutterwave";
 import { loadActiveMenuCart, syncActiveMenuCart } from "../lib/menuCart";
+import { useHotelTenant } from "../lib/hotelTenant";
 import {
   Card,
   CardContent,
@@ -61,6 +62,7 @@ import {
 } from "lucide-react";
 
 const MenuPage = () => {
+  const { tenant } = useHotelTenant();
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("all");
   const [cart, setCart] = useState<{ [key: string]: number }>({});
@@ -153,7 +155,7 @@ const MenuPage = () => {
   const [menuItemsReady, setMenuItemsReady] = useState(false);
 
   useEffect(() => {
-    if (!cartReady || !menuItemsReady || (!durableCartId && Object.keys(cart).length === 0)) return;
+    if (!cartReady || !menuItemsReady || menuItems.length === 0 || (!durableCartId && Object.keys(cart).length === 0)) return;
 
     const timeout = window.setTimeout(() => {
       const items = Object.entries(cart)
@@ -335,7 +337,7 @@ const MenuPage = () => {
             </Badge>
           </div>
           <h1 className="text-4xl md:text-5xl font-bold text-sheraton-navy mb-4">
-            Sheraton Special Menu
+            {tenant?.name || "Hotel"} Menu
           </h1>
           <p className="text-lg text-muted-foreground max-w-2xl mx-auto">
             Real-time availability • Eco-friendly • Skip the queue • Special

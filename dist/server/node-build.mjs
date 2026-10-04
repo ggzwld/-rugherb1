@@ -9,6 +9,134 @@ const handleDemo = (req, res) => {
   };
   res.status(200).json(response);
 };
+const configuration$1 = () => {
+  const supabaseUrl = process.env.VITE_SUPABASE_URL;
+  const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !supabaseAnonKey || !serviceRoleKey) {
+    throw new Error("Hotel tenant database configuration is incomplete");
+  }
+  return { supabaseUrl: supabaseUrl.replace(/\/$/, ""), supabaseAnonKey, serviceRoleKey };
+};
+const serviceHeaders$1 = (json = false) => {
+  const { supabaseAnonKey, serviceRoleKey } = configuration$1();
+  return {
+    apikey: supabaseAnonKey,
+    Authorization: `Bearer ${serviceRoleKey}`,
+    ...json ? { "content-type": "application/json" } : {}
+  };
+};
+const hostnameFromRequest = (request) => request.hostname.toLowerCase().replace(/\.$/, "");
+const resolveRequestHotelTenant = async (request) => {
+  const hostname = hostnameFromRequest(request);
+  if (!hostname) throw new Error("Hotel domain is missing");
+  const { supabaseUrl } = configuration$1();
+  const tenantResponse = await fetch(`${supabaseUrl}/rest/v1/rpc/resolve_hotel_tenant`, {
+    method: "POST",
+    headers: serviceHeaders$1(true),
+    body: JSON.stringify({ target_hostname: hostname }),
+    signal: AbortSignal.timeout(1e4)
+  });
+  const payload = await tenantResponse.json().catch(() => null);
+  const tenants = Array.isArray(payload) ? payload : payload ? [payload] : [];
+  if (!tenantResponse.ok || tenants.length !== 1) throw new Error("This hotel domain is not configured");
+  const tenant = tenants[0];
+  return {
+    organizationId: tenant.organization_id,
+    domain: tenant.domain,
+    name: tenant.name,
+    logoUrl: tenant.logo_url,
+    primaryColor: tenant.primary_color,
+    accentColor: tenant.accent_color
+  };
+};
+const setPrivateTenantResponse = (response) => response.setHeader("Cache-Control", "private, no-store");
+const readService$1 = async (path2) => {
+  const { supabaseUrl } = configuration$1();
+  const response = await fetch(`${supabaseUrl}/rest/v1/${path2}`, {
+    headers: serviceHeaders$1(),
+    signal: AbortSignal.timeout(1e4)
+  });
+  if (!response.ok) throw new Error("Hotel information could not be loaded");
+  return response.json();
+};
+const callTenantRpc = async (name, args) => {
+  const { supabaseUrl } = configuration$1();
+  const response = await fetch(`${supabaseUrl}/rest/v1/rpc/${name}`, {
+    method: "POST",
+    headers: serviceHeaders$1(true),
+    body: JSON.stringify(args),
+    signal: AbortSignal.timeout(1e4)
+  });
+  if (!response.ok) throw new Error("Hotel information could not be loaded");
+  return response.json();
+};
+const getHotelTenant = async (request, response) => {
+  try {
+    setPrivateTenantResponse(response);
+    response.json(await resolveRequestHotelTenant(request));
+  } catch (error) {
+    response.status(404).json({ error: error instanceof Error ? error.message : "This hotel domain is not configured" });
+  }
+};
+const getPublicHotelBookingData = async (request, response) => {
+  try {
+    const tenant = await resolveRequestHotelTenant(request);
+    const organizationId = encodeURIComponent(tenant.organizationId);
+    const [settings, offers, rooms] = await Promise.all([
+      readService$1(`hotel_tenant_settings?organization_id=eq.${organizationId}&select=booking_title,booking_subtitle&is_active=eq.true&limit=1`),
+      readService$1(`hotel_booking_offers?organization_id=eq.${organizationId}&is_active=eq.true&select=id,title,description,discount_percentage,minimum_nights,starts_at,ends_at&order=display_order`),
+      readService$1(`hotel_public_room_listings?organization_id=eq.${organizationId}&select=id,organization_id,name,room_type,description,image_url,size_sqm,max_guests,available_units,nightly_rate,original_nightly_rate,currency_code,amenities,status,hotel_name,hotel_city,hotel_country,hotel_classification&order=nightly_rate`)
+    ]);
+    if (settings.length !== 1) throw new Error("Hotel booking content is not configured");
+    setPrivateTenantResponse(response);
+    response.json({ tenant, settings: { title: settings[0].booking_title, subtitle: settings[0].booking_subtitle }, offers, rooms });
+  } catch (error) {
+    response.status(404).json({ error: error instanceof Error ? error.message : "Hotel information could not be loaded" });
+  }
+};
+const getPublicMenuItems = async (request, response) => {
+  try {
+    const tenant = await resolveRequestHotelTenant(request);
+    const organizationId = encodeURIComponent(tenant.organizationId);
+    const select = "id,organization_id,name,short_description,full_description,currency,media_type,media_url,media_attachment_id,price,original_price,category,icon,preparation_time,availability,max_availability,dietary_tags,spice_level,origin,calories,chef_note,special_offer,status_labels,is_trending,is_published,created_at";
+    const items = await readService$1(`menu_items?organization_id=eq.${organizationId}&is_published=eq.true&select=${select}&order=created_at.asc`);
+    setPrivateTenantResponse(response);
+    response.json({ tenant, items });
+  } catch (error) {
+    response.status(404).json({ error: error instanceof Error ? error.message : "Menu information could not be loaded" });
+  }
+};
+const getPublicSpecialEvents = async (request, response) => {
+  try {
+    const tenant = await resolveRequestHotelTenant(request);
+    const organizationId = encodeURIComponent(tenant.organizationId);
+    const select = "id,title,description,starts_at,ends_at,timezone,location,facility_id,organization_id,is_private,share_token,price,currency,capacity,ticket_type_capacity,max_tickets_per_order,default_ticket_type_id,attendees_count,category,image_url,featured,rating,host_name,status,organizer_id,created_at,updated_at";
+    const events = await readService$1(`special_events?organization_id=eq.${organizationId}&status=eq.published&is_private=eq.false&starts_at=gte.${encodeURIComponent((/* @__PURE__ */ new Date()).toISOString())}&select=${select}&order=featured.desc,starts_at.asc`);
+    setPrivateTenantResponse(response);
+    response.json({ events });
+  } catch (error) {
+    response.status(404).json({ error: error instanceof Error ? error.message : "Event information could not be loaded" });
+  }
+};
+const getTenantRoomAvailability = async (request, response) => {
+  try {
+    const { checkIn, checkOut } = request.body;
+    if (!checkIn || !/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !checkOut || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
+      response.status(400).json({ error: "Select valid check-in and check-out dates" });
+      return;
+    }
+    const tenant = await resolveRequestHotelTenant(request);
+    const availability = await callTenantRpc(
+      "get_hotel_room_availability_for_tenant",
+      { target_organization_id: tenant.organizationId, target_check_in: checkIn, target_check_out: checkOut }
+    );
+    setPrivateTenantResponse(response);
+    response.json({ availability });
+  } catch (error) {
+    response.status(404).json({ error: error instanceof Error ? error.message : "Hotel availability could not be loaded" });
+  }
+};
 const flutterwaveBaseUrl$2 = "https://api.flutterwave.com/v3";
 const flutterwaveReturnPath$1 = "/checkout/flutterwave-return";
 class FlutterwaveRequestError extends Error {
@@ -17,13 +145,14 @@ class FlutterwaveRequestError extends Error {
     this.status = status;
   }
 }
-const getFlutterwaveReturnUrl = () => {
+const getFlutterwaveReturnUrl = (domain) => {
   const returnUrl = process.env.FLUTTERWAVE_RETURN_URL;
   if (!returnUrl) throw new Error("Flutterwave return URL is not configured");
   const parsedUrl = new URL(returnUrl);
   if (parsedUrl.protocol !== "https:" || parsedUrl.pathname !== flutterwaveReturnPath$1) {
     throw new Error("Flutterwave return URL must use HTTPS and target the payment return route");
   }
+  parsedUrl.hostname = domain;
   return parsedUrl.toString();
 };
 const getConfiguration$2 = () => {
@@ -218,11 +347,14 @@ const createMenuPaymentAttempt = async (order, txRef) => {
   if (!attempt) throw new Error("Payment attempt was not returned");
   return attempt;
 };
-const prepareFlutterwaveHostedSession = async ({ orderId }, authorization) => {
+const prepareFlutterwaveHostedSession = async ({ orderId }, authorization, tenantOrganizationId, tenantDomain) => {
   let txRef;
   try {
     if (!orderId) throw new Error("Order ID is required");
     const order = await getAuthenticatedOrder(orderId, authorization);
+    if (order.organization_id !== tenantOrganizationId) {
+      throw new FlutterwaveRequestError("This order is not available for this hotel", 404);
+    }
     if (order.payment_status === "paid") {
       throw new FlutterwaveRequestError("This order has already been paid", 409);
     }
@@ -253,7 +385,7 @@ const prepareFlutterwaveHostedSession = async ({ orderId }, authorization) => {
         amount,
         currency,
         payment_options: getPaymentOptions(order.payment_method, currency),
-        redirect_url: getFlutterwaveReturnUrl(),
+        redirect_url: getFlutterwaveReturnUrl(tenantDomain),
         customer: {
           email: order.email,
           name: `${order.first_name} ${order.last_name}`.trim(),
@@ -281,9 +413,12 @@ const prepareFlutterwaveHostedSession = async ({ orderId }, authorization) => {
 };
 const createFlutterwaveHostedSession = async (req, res) => {
   try {
+    const tenant = await resolveRequestHotelTenant(req);
     const paymentSession = await prepareFlutterwaveHostedSession(
       req.body,
-      req.headers.authorization
+      req.headers.authorization,
+      tenant.organizationId,
+      tenant.domain
     );
     return res.json(paymentSession);
   } catch (error) {
@@ -300,9 +435,11 @@ const cancelFlutterwavePayment = async (req, res) => {
     if (status !== "cancelled" && status !== "failed") {
       return res.status(400).json({ error: "Payment outcome is invalid" });
     }
+    const tenant = await resolveRequestHotelTenant(req);
     const attempt = await getPaymentAttempt(txRef);
     const order = await getOrderByIdAsService(attempt.order_id);
-    await getAuthenticatedOrder(order.id, req.headers.authorization);
+    const authenticatedOrder = await getAuthenticatedOrder(order.id, req.headers.authorization);
+    if (authenticatedOrder.organization_id !== tenant.organizationId) throw new FlutterwaveRequestError("This order is not available for this hotel", 404);
     if (attempt.status === "completed" || attempt.status === "manual_review" || order.payment_status === "paid") {
       return res.json({ orderId: order.id, paymentStatus: order.payment_status });
     }
@@ -316,7 +453,7 @@ const cancelFlutterwavePayment = async (req, res) => {
     return res.json({ orderId: order.id, paymentStatus: status });
   } catch (error) {
     console.error("Flutterwave payment cancellation error", error);
-    return res.status(400).json({
+    return res.status(error instanceof FlutterwaveRequestError ? error.status : 400).json({
       error: error instanceof Error ? error.message : "Unable to record payment cancellation"
     });
   }
@@ -327,8 +464,10 @@ const verifyFlutterwavePayment = async (req, res) => {
     if (!transactionId || !txRef) {
       return res.status(400).json({ error: "Payment verification details are required" });
     }
+    const tenant = await resolveRequestHotelTenant(req);
     const order = await getOrderByPaymentReference(txRef);
-    await getAuthenticatedOrder(order.id, req.headers.authorization);
+    const authenticatedOrder = await getAuthenticatedOrder(order.id, req.headers.authorization);
+    if (authenticatedOrder.organization_id !== tenant.organizationId) throw new FlutterwaveRequestError("This order is not available for this hotel", 404);
     const transaction = await verifyTransaction$2(String(transactionId));
     const result = await confirmPayment(transaction, txRef, order);
     return res.json({
@@ -338,7 +477,7 @@ const verifyFlutterwavePayment = async (req, res) => {
     });
   } catch (error) {
     console.error("Flutterwave payment verification error", error);
-    return res.status(400).json({
+    return res.status(error instanceof FlutterwaveRequestError ? error.status : 400).json({
       error: error instanceof Error ? error.message : "Unable to verify payment"
     });
   }
@@ -385,13 +524,45 @@ const getConfiguration$1 = () => {
   }
   return { secretKey, secretHash, supabaseUrl, supabaseAnonKey, supabaseServiceRoleKey };
 };
-const getReturnUrl$1 = () => {
+const getAuthenticatedEventUserId = async (authorization) => {
+  if (!authorization?.startsWith("Bearer ")) throw new SpecialEventPaymentError("Missing authenticated session", 401);
+  const { supabaseUrl, supabaseAnonKey } = getConfiguration$1();
+  const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
+    headers: { apikey: supabaseAnonKey, Authorization: authorization },
+    signal: AbortSignal.timeout(1e4)
+  });
+  if (!response.ok) throw new SpecialEventPaymentError("Your sign-in session has expired", 401);
+  const user = await response.json();
+  if (!user.id) throw new SpecialEventPaymentError("Your sign-in session could not be verified", 401);
+  return user.id;
+};
+const callTenantEventRpc = async (name, args) => {
+  const { supabaseUrl, supabaseAnonKey, supabaseServiceRoleKey } = getConfiguration$1();
+  const response = await fetch(`${supabaseUrl}/rest/v1/rpc/${name}`, {
+    method: "POST",
+    headers: { ...restHeaders(supabaseServiceRoleKey, supabaseAnonKey, true), Prefer: "return=representation" },
+    body: JSON.stringify(args),
+    signal: AbortSignal.timeout(15e3)
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(payload && typeof payload === "object" && "message" in payload && typeof payload.message === "string" ? payload.message : "Unable to create event booking");
+  return payload;
+};
+const assertEventBookingTenant = async (request, booking) => {
+  const tenant = await resolveRequestHotelTenant(request);
+  if (booking.organization_id !== tenant.organizationId) {
+    throw new SpecialEventPaymentError("This event booking is not available for this hotel", 404);
+  }
+  return tenant;
+};
+const getReturnUrl$1 = (domain) => {
   const value = process.env.FLUTTERWAVE_RETURN_URL;
   if (!value) throw new Error("Flutterwave return URL is not configured");
   const parsed = new URL(value);
   if (parsed.protocol !== "https:" || parsed.pathname !== flutterwaveReturnPath) {
     throw new Error("Flutterwave return URL must use HTTPS and target the payment return route");
   }
+  parsed.hostname = domain;
   return parsed.toString();
 };
 const restHeaders = (token, anonKey, json = false) => ({
@@ -488,6 +659,57 @@ const assertTransactionMatches = (transaction, attempt, booking) => {
   if (Number(transaction.amount) !== Number(booking.total_amount) || Number(transaction.amount) !== Number(attempt.amount) || transaction.currency.toUpperCase() !== booking.currency.toUpperCase() || transaction.currency.toUpperCase() !== attempt.currency.toUpperCase()) throw new Error("Event payment amount does not match the booking");
   if (transaction.meta?.booking_id !== booking.id) throw new Error("Event payment metadata does not match the booking");
 };
+const createSpecialEventBooking = async (req, res) => {
+  try {
+    const tenant = await resolveRequestHotelTenant(req);
+    const userId = await getAuthenticatedEventUserId(req.headers.authorization);
+    const input = req.body;
+    if (!input.eventId || !/^[0-9a-f-]{36}$/i.test(input.eventId) || !Number.isInteger(input.quantity) || !input.idempotencyKey || !/^[0-9a-f-]{8}-[0-9a-f-]{4}-[0-9a-f-]{4}-[0-9a-f-]{4}-[0-9a-f-]{12}$/i.test(input.idempotencyKey)) {
+      throw new SpecialEventPaymentError("Event booking details are invalid");
+    }
+    const rows = await callTenantEventRpc(
+      "create_special_event_booking_for_tenant",
+      {
+        target_organization_id: tenant.organizationId,
+        target_user_id: userId,
+        target_event_id: input.eventId,
+        target_quantity: input.quantity,
+        guest_first_name: input.firstName,
+        guest_last_name: input.lastName,
+        guest_email: input.email,
+        guest_phone: input.phone || null,
+        special_requests: input.specialRequests || null,
+        target_ticket_type_id: input.ticketTypeId || null,
+        target_idempotency_key: input.idempotencyKey,
+        target_attendee_names: input.attendeeNames || null,
+        target_invitation_id: input.invitationId || null,
+        target_share_token: input.shareToken || null
+      }
+    );
+    const [booking] = rows;
+    if (!booking) throw new Error("Event booking was not returned");
+    return res.status(201).json(booking);
+  } catch (error) {
+    return res.status(error instanceof SpecialEventPaymentError ? error.status : 400).json({ error: error instanceof Error ? error.message : "Unable to create event booking" });
+  }
+};
+const confirmFreeSpecialEventBooking = async (req, res) => {
+  try {
+    const tenant = await resolveRequestHotelTenant(req);
+    const userId = await getAuthenticatedEventUserId(req.headers.authorization);
+    const { bookingId } = req.body;
+    if (!bookingId || !/^[0-9a-f-]{36}$/i.test(bookingId)) throw new SpecialEventPaymentError("Event booking is invalid");
+    const rows = await callTenantEventRpc(
+      "confirm_free_special_event_booking_for_tenant",
+      { target_organization_id: tenant.organizationId, target_user_id: userId, target_booking_id: bookingId }
+    );
+    const [confirmation] = rows;
+    if (!confirmation) throw new Error("Event confirmation was not returned");
+    return res.json(confirmation);
+  } catch (error) {
+    return res.status(error instanceof SpecialEventPaymentError ? error.status : 400).json({ error: error instanceof Error ? error.message : "Unable to confirm free event booking" });
+  }
+};
 const prepareSpecialEventPayment = async (req, res) => {
   let bookingId;
   let txRef;
@@ -495,6 +717,7 @@ const prepareSpecialEventPayment = async (req, res) => {
     bookingId = req.body.bookingId;
     if (!bookingId) throw new SpecialEventPaymentError("Booking ID is required");
     const booking = await getBooking$1(bookingId, req.headers.authorization);
+    const tenant = await assertEventBookingTenant(req, booking);
     if (booking.payment_status === "paid") throw new SpecialEventPaymentError("This event booking has already been paid", 409);
     if (booking.status !== "pending" || booking.payment_status !== "pending") throw new SpecialEventPaymentError("This event booking is no longer pending", 409);
     if (booking.expires_at && new Date(booking.expires_at).getTime() <= Date.now()) throw new SpecialEventPaymentError("This ticket hold has expired. Start a new booking.", 409);
@@ -535,7 +758,7 @@ const prepareSpecialEventPayment = async (req, res) => {
         amount: Number(booking.total_amount),
         currency: booking.currency,
         payment_options: "card",
-        redirect_url: getReturnUrl$1(),
+        redirect_url: getReturnUrl$1(tenant.domain),
         customer: { email: booking.guest_email, name: `${booking.guest_first_name} ${booking.guest_last_name}`.trim(), phonenumber: booking.guest_phone },
         meta: { booking_id: booking.id, order_number: booking.order_number },
         customizations: { title: "Special Events", description: `Event booking ${booking.order_number}` }
@@ -560,6 +783,7 @@ const verifySpecialEventPayment = async (req, res) => {
     if (!transactionId || !txRef) return res.status(400).json({ error: "Event payment verification details are required" });
     const attempt = await getPaymentAttemptAsService(txRef);
     const booking = await getBooking$1(attempt.booking_id, req.headers.authorization);
+    await assertEventBookingTenant(req, booking);
     const transaction = await verifyTransaction$1(String(transactionId));
     assertTransactionMatches(transaction, attempt, booking);
     if (attempt.status !== "successful" && attempt.status !== "manual_review") {
@@ -576,7 +800,8 @@ const cancelSpecialEventPayment = async (req, res) => {
     const { txRef, status } = req.body;
     if (!txRef || status !== "cancelled" && status !== "failed") return res.status(400).json({ error: "Event payment outcome is invalid" });
     const attempt = await getPaymentAttemptAsService(txRef);
-    await getBooking$1(attempt.booking_id, req.headers.authorization);
+    const booking = await getBooking$1(attempt.booking_id, req.headers.authorization);
+    await assertEventBookingTenant(req, booking);
     if (attempt.status === "successful" || attempt.status === "manual_review") {
       return res.json({ bookingId: attempt.booking_id, paymentStatus: attempt.status });
     }
@@ -712,23 +937,32 @@ const getBooking = async (bookingId) => {
   if (!rows[0]) throw new HotelBookingError("Hotel reservation was not found", 404);
   return rows[0];
 };
+const assertBookingTenant = async (request, booking) => {
+  const tenant = await resolveRequestHotelTenant(request);
+  if (booking.organization_id !== tenant.organizationId) {
+    throw new HotelBookingError("This reservation is not available for this hotel", 404);
+  }
+  return tenant;
+};
 const getAttempt = async (txRef) => {
   const rows = await readService(`hotel_payment_attempts?tx_ref=eq.${encodeURIComponent(txRef)}&select=*`);
   if (!rows[0]) throw new HotelBookingError("Payment attempt was not found", 404);
   return rows[0];
 };
-const getReturnUrl = () => {
+const getReturnUrl = (domain) => {
   const configuredUrl = process.env.FLUTTERWAVE_RETURN_URL;
   if (!configuredUrl) throw new Error("Flutterwave return URL is not configured");
   const url = new URL(configuredUrl);
   if (url.protocol !== "https:" || url.pathname !== "/checkout/flutterwave-return") {
     throw new Error("Flutterwave return URL must use HTTPS and target the payment return route");
   }
+  url.hostname = domain;
   url.searchParams.set("flow", "hotel");
   return url.toString();
 };
 const createBooking = async (request, response) => {
   try {
+    const tenant = await resolveRequestHotelTenant(request);
     const body = request.body;
     const userId = await resolveAuthenticatedUserId(request.headers.authorization);
     const email = safeText(body.guest?.email, 254).toLowerCase();
@@ -743,22 +977,26 @@ const createBooking = async (request, response) => {
     if (!Array.isArray(body.preferences) || body.preferences.some((value) => typeof value !== "string")) throw new HotelBookingError("Room preferences are invalid");
     const accessTokenHash = createHash("sha256").update(body.accessToken).digest("hex");
     const bookingWithKey = (await readService(
-      `hotel_bookings?idempotency_key=eq.${encodeURIComponent(body.idempotencyKey)}&select=user_id,access_token_hash,fx_rates_snapshot&limit=1`
+      `hotel_bookings?idempotency_key=eq.${encodeURIComponent(body.idempotencyKey)}&select=organization_id,user_id,access_token_hash,fx_rates_snapshot&limit=1`
     ))[0];
+    if (bookingWithKey && bookingWithKey.organization_id !== tenant.organizationId) {
+      throw new HotelBookingError("Reservation belongs to a different hotel", 404);
+    }
     const existingBooking = bookingWithKey?.user_id === userId && bookingWithKey.access_token_hash === accessTokenHash ? bookingWithKey : null;
     let ratesSnapshot = null;
     if (!existingBooking) {
       const rateLimitAllowed = await callServiceRpc("consume_hotel_booking_rate_limit", { target_rate_limit_key: rateLimitKey });
       if (!rateLimitAllowed) throw new HotelBookingError("Too many reservation attempts. Please try again later", 429);
       ratesSnapshot = await fetchAndStoreRates();
-      const selectedRoom = (await readService(`hotel_rooms?id=eq.${encodeURIComponent(body.roomId)}&status=eq.published&select=currency_code`))[0];
+      const selectedRoom = (await readService(`hotel_rooms?id=eq.${encodeURIComponent(body.roomId)}&organization_id=eq.${encodeURIComponent(tenant.organizationId)}&status=eq.published&select=currency_code`))[0];
       if (!selectedRoom) throw new HotelBookingError("This room is not available for booking", 404);
       const currency = selectedRoom.currency_code.trim().toUpperCase();
       if (!supportedCurrencies.has(currency) || !ratesSnapshot.rates[currency]) throw new HotelBookingError("This room uses an unsupported booking currency");
     }
     const rows = await callServiceRpc(
-      "create_hotel_booking",
+      "create_hotel_booking_for_tenant",
       {
+        target_organization_id: tenant.organizationId,
         target_room_id: body.roomId,
         target_guest: {
           first_name: safeText(body.guest?.firstName, 100),
@@ -797,6 +1035,7 @@ const createPaymentSession = async (request, response) => {
     const { bookingId, accessToken } = request.body;
     if (!bookingId || !accessToken) throw new HotelBookingError("Booking access is required");
     const booking = await getBooking(bookingId);
+    const tenant = await assertBookingTenant(request, booking);
     const tokenHash = createHash("sha256").update(accessToken).digest("hex");
     if (tokenHash !== booking.access_token_hash) throw new HotelBookingError("Booking access could not be verified", 403);
     if (booking.payment_status === "paid") throw new HotelBookingError("This reservation is already paid", 409);
@@ -833,7 +1072,7 @@ const createPaymentSession = async (request, response) => {
         amount: Number(booking.total_amount),
         currency,
         payment_options: currency === "UGX" ? "card, mobilemoneyuganda" : "card",
-        redirect_url: getReturnUrl(),
+        redirect_url: getReturnUrl(tenant.domain),
         customer: {
           email: booking.guest_email,
           name: `${booking.guest_first_name} ${booking.guest_last_name}`.trim(),
@@ -873,9 +1112,12 @@ const verifyTransaction = async (transactionId) => {
   if (!response.ok || payload.status !== "success" || !payload.data) throw new Error("Hotel payment could not be verified");
   return payload.data;
 };
-const verifyHotelPayment = async (transactionId, txRef, accessToken) => {
+const verifyHotelPayment = async (transactionId, txRef, accessToken, tenantOrganizationId) => {
   const attempt = await getAttempt(txRef);
   const booking = await getBooking(attempt.booking_id);
+  if (tenantOrganizationId && booking.organization_id !== tenantOrganizationId) {
+    throw new HotelBookingError("This reservation is not available for this hotel", 404);
+  }
   if (accessToken && createHash("sha256").update(accessToken).digest("hex") !== booking.access_token_hash) {
     throw new HotelBookingError("Booking access could not be verified", 403);
   }
@@ -898,6 +1140,7 @@ const recoverHotelBooking = async (request, response) => {
       throw new HotelBookingError("Booking recovery details are invalid");
     }
     const booking = await getBooking(bookingId);
+    await assertBookingTenant(request, booking);
     if (createHash("sha256").update(accessToken).digest("hex") !== booking.access_token_hash) {
       throw new HotelBookingError("Booking access could not be verified", 403);
     }
@@ -925,7 +1168,10 @@ const cancelHotelBookingHold = async (request, response) => {
     if (!bookingId || !/^[0-9a-f-]{36}$/i.test(bookingId) || !accessToken || accessToken.length < 32 || accessToken.length > 256) {
       throw new HotelBookingError("Booking cancellation details are invalid");
     }
+    const booking = await getBooking(bookingId);
+    await assertBookingTenant(request, booking);
     const tokenHash = createHash("sha256").update(accessToken).digest("hex");
+    if (tokenHash !== booking.access_token_hash) throw new HotelBookingError("Booking access could not be verified", 403);
     const cancelled = await callServiceRpc("cancel_hotel_booking_hold", {
       target_booking_id: bookingId,
       target_access_token_hash: tokenHash
@@ -941,7 +1187,8 @@ const verifyHotelBookingPayment = async (request, response) => {
   try {
     const { transactionId, txRef, accessToken } = request.body;
     if (!transactionId || !txRef?.startsWith("hotel-") || !accessToken) throw new HotelBookingError("Payment verification details are required");
-    const confirmation = await verifyHotelPayment(String(transactionId), txRef, accessToken);
+    const tenant = await resolveRequestHotelTenant(request);
+    const confirmation = await verifyHotelPayment(String(transactionId), txRef, accessToken, tenant.organizationId);
     response.json({ ...confirmation, paymentStatus: confirmation.payment_status });
   } catch (error) {
     response.status(error instanceof HotelBookingError ? error.status : 503).json({
@@ -957,6 +1204,7 @@ const cancelHotelBookingPayment = async (request, response) => {
     }
     const attempt = await getAttempt(txRef);
     const booking = await getBooking(attempt.booking_id);
+    await assertBookingTenant(request, booking);
     if (createHash("sha256").update(accessToken).digest("hex") !== booking.access_token_hash) throw new HotelBookingError("Booking access could not be verified", 403);
     if (attempt.status !== "completed") {
       await writeService(`hotel_payment_attempts?tx_ref=eq.${encodeURIComponent(txRef)}`, "PATCH", {
@@ -1035,8 +1283,9 @@ const createMenuOrder = async (request, response) => {
     if (typeof input.tipAmount !== "number" || !Number.isFinite(input.tipAmount)) {
       return response.status(400).json({ error: "Tip amount is invalid." });
     }
+    const tenant = await resolveRequestHotelTenant(request);
     const { supabaseUrl, supabaseAnonKey, serviceRoleKey } = getConfiguration();
-    const rpcResponse = await fetch(`${supabaseUrl}/rest/v1/rpc/create_menu_order`, {
+    const rpcResponse = await fetch(`${supabaseUrl}/rest/v1/rpc/create_menu_order_for_tenant`, {
       method: "POST",
       headers: {
         apikey: supabaseAnonKey,
@@ -1045,6 +1294,7 @@ const createMenuOrder = async (request, response) => {
         Prefer: "return=representation"
       },
       body: JSON.stringify({
+        target_organization_id: tenant.organizationId,
         target_user_id: userId,
         target_items: input.items.map(({ menuItemId, quantity }) => ({ menuItemId, quantity })),
         target_order_type: input.orderType,
@@ -1080,6 +1330,13 @@ function createServer() {
     res.json({ message: "Hello from Express server v2!" });
   });
   app2.get("/api/demo", handleDemo);
+  app2.get("/api/hotel-tenant", getHotelTenant);
+  app2.get("/api/hotel-booking-data", getPublicHotelBookingData);
+  app2.get("/api/hotel-menu-items", getPublicMenuItems);
+  app2.get("/api/hotel-events", getPublicSpecialEvents);
+  app2.post("/api/hotel-availability", getTenantRoomAvailability);
+  app2.post("/api/special-events/bookings/create", createSpecialEventBooking);
+  app2.post("/api/special-events/bookings/confirm-free", confirmFreeSpecialEventBooking);
   app2.post("/api/payments/flutterwave/hosted-session", createFlutterwaveHostedSession);
   app2.post("/api/payments/flutterwave/cancel", cancelFlutterwavePayment);
   app2.post("/api/payments/flutterwave/verify", verifyFlutterwavePayment);
