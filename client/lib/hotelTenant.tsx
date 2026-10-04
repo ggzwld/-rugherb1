@@ -1,12 +1,11 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import { createContext, ReactNode, useContext, useEffect, useState } from "react";
-
 export type HotelTenant = {
   organizationId: string;
+  domain: string;
   name: string;
   logoUrl: string | null;
-  primaryColor: string;
-  accentColor: string;
+  primaryColor: string | null;
+  accentColor: string | null;
 };
 
 type HotelTenantState = {
@@ -23,14 +22,18 @@ export function HotelTenantProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let active = true;
     const resolveTenant = async () => {
-      const response = await fetch("/api/hotel-tenant");
-      const payload = await response.json().catch(() => null) as HotelTenant | { error?: string } | null;
-      if (!active) return;
-      if (!response.ok || !payload || !("organizationId" in payload)) {
-        setState({ tenant: null, loading: false, error: payload && "error" in payload ? payload.error || "This hotel domain is not configured." : "This hotel domain is not configured." });
-        return;
+      try {
+        const response = await fetch("/api/hotel-tenant", { cache: "no-store" });
+        const payload = await response.json().catch(() => null) as HotelTenant | { error?: string } | null;
+        if (!active) return;
+        if (!response.ok || !payload || !("organizationId" in payload)) {
+          setState({ tenant: null, loading: false, error: payload && "error" in payload ? payload.error || "This hotel domain is not configured." : "This hotel domain is not configured." });
+          return;
+        }
+        setState({ tenant: payload, loading: false, error: null });
+      } catch {
+        if (active) setState({ tenant: null, loading: false, error: "This hotel domain is not configured." });
       }
-      setState({ tenant: payload, loading: false, error: null });
     };
 
     void resolveTenant();
@@ -41,8 +44,8 @@ export function HotelTenantProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!state.tenant) return;
-    const primaryColor = hexToHsl(state.tenant.primaryColor);
-    const accentColor = hexToHsl(state.tenant.accentColor);
+    const primaryColor = state.tenant.primaryColor ? hexToHsl(state.tenant.primaryColor) : null;
+    const accentColor = state.tenant.accentColor ? hexToHsl(state.tenant.accentColor) : null;
     if (primaryColor) {
       document.documentElement.style.setProperty("--primary", primaryColor);
       document.documentElement.style.setProperty("--ring", primaryColor);

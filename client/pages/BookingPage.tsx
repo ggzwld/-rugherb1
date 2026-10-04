@@ -45,16 +45,12 @@ type SavedBookingAccess = { bookingId: string; accessToken: string; confirmation
 type ManagerBooking = { id: string; confirmation_number: string; room_id: string; check_in: string; check_out: string; guest_first_name: string; guest_last_name: string; guest_email: string; guest_count: number; booking_status: string; payment_status: string; total_amount: number; currency_code: string; books_accounting_status: string; books_accounting_error: string | null; hotel_rooms: { name: string } | null; hotel_payment_attempts: { status: string }[] };
 
 const currencies = ["USD", "UGX", "EUR", "GBP", "KES", "TZS", "RWF"];
-const defaultSettings = {
-  title: "Book Your Special Stay",
-  subtitle: "Experience luxury, comfort, and personalized service. Every detail crafted to make your stay extraordinary.",
-};
 const today = new Date();
 const money = (value: number, currency: string) => new Intl.NumberFormat(undefined, { style: "currency", currency }).format(value || 0);
 
 const BookingPage = () => {
   const { toast } = useToast();
-  const [settings, setSettings] = useState<BookingSettings>(defaultSettings);
+  const [settings, setSettings] = useState<BookingSettings>({ title: "", subtitle: "" });
   const [offers, setOffers] = useState<BookingOffer[]>([]);
   const [rooms, setRooms] = useState<HotelRoom[]>([]);
   const [managerBookings, setManagerBookings] = useState<ManagerBooking[]>([]);
@@ -82,32 +78,37 @@ const BookingPage = () => {
   const loadPage = async () => {
     setLoading(true);
     try {
-      const [settingsResult, offerResult, roomResult, authResult] = await Promise.all([
-        supabase.from("hotel_booking_page_settings").select("title,subtitle").eq("id", true).maybeSingle(),
-        supabase.from("hotel_booking_offers").select("id,title,description,discount_percentage,minimum_nights,starts_at,ends_at").eq("is_active", true).order("display_order"),
-        supabase.from("hotel_public_room_listings").select("id,organization_id,name,room_type,description,image_url,size_sqm,max_guests,available_units,nightly_rate,original_nightly_rate,currency_code,amenities,status,hotel_name,hotel_city,hotel_country,hotel_classification").order("nightly_rate"),
+      const [bookingResponse, authResult] = await Promise.all([
+        fetch("/api/hotel-booking-data", { cache: "no-store" }),
         supabase.auth.getUser(),
       ]);
-      if (settingsResult.error) throw settingsResult.error;
-      if (offerResult.error) throw offerResult.error;
-      if (roomResult.error) throw roomResult.error;
-      setSettings(settingsResult.data || defaultSettings);
+      const bookingData = await bookingResponse.json().catch(() => null) as {
+        tenant?: { organizationId: string };
+        settings?: BookingSettings;
+        offers?: BookingOffer[];
+        rooms?: HotelRoom[];
+        error?: string;
+      } | null;
+      if (!bookingResponse.ok || !bookingData?.tenant || !bookingData.settings) {
+        throw new Error(bookingData?.error || "This hotel domain is not configured.");
+      }
+      setSettings(bookingData.settings);
       const now = Date.now();
-      setOffers((offerResult.data || []).filter((offer) => (!offer.starts_at || new Date(offer.starts_at).getTime() <= now) && (!offer.ends_at || new Date(offer.ends_at).getTime() > now)));
-      setRooms((roomResult.data || []) as HotelRoom[]);
+      setOffers((bookingData.offers || []).filter((offer) => (!offer.starts_at || new Date(offer.starts_at).getTime() <= now) && (!offer.ends_at || new Date(offer.ends_at).getTime() > now)));
+      setRooms(bookingData.rooms || []);
       const user = authResult.data.user;
       if (user) {
-        const { data: profile } = await supabase.from("user_profiles").select("role,hotel_star_rating").eq("user_id", user.id).maybeSingle();
-        if (profile?.role === "manager") {
+        const { data: profile } = await supabase.from("user_profiles").select("role").eq("user_id", user.id).maybeSingle();
+        const { data: membership } = await supabase.from("books_memberships").select("organization_id").eq("organization_id", bookingData.tenant.organizationId).eq("user_id", user.id).in("role", ["owner", "admin"]).maybeSingle();
+        if (profile?.role === "manager" && membership) {
           setManagerUserId(user.id);
-          setHotelClassification(profile.hotel_star_rating ? Number(profile.hotel_star_rating) : null);
-          const { data: organizationId, error: organizationError } = await supabase.rpc("get_or_create_books_organization");
-          if (organizationError) throw organizationError;
-          setManagerOrganizationId(organizationId);
-          const { data: managerRooms, error: managerRoomsError } = await supabase.from("hotel_rooms").select("id,organization_id,name,room_type,description,image_url,size_sqm,max_guests,available_units,nightly_rate,original_nightly_rate,currency_code,amenities,status").eq("organization_id", organizationId).order("created_at", { ascending: false });
+          setManagerOrganizationId(bookingData.tenant.organizationId);
+          const { data: organization } = await supabase.from("books_organizations").select("hotel_classification").eq("id", bookingData.tenant.organizationId).maybeSingle();
+          setHotelClassification(organization?.hotel_classification ? Number(organization.hotel_classification) : null);
+          const { data: managerRooms, error: managerRoomsError } = await supabase.from("hotel_rooms").select("id,organization_id,name,room_type,description,image_url,size_sqm,max_guests,available_units,nightly_rate,original_nightly_rate,currency_code,amenities,status").eq("organization_id", bookingData.tenant.organizationId).order("created_at", { ascending: false });
           if (managerRoomsError) throw managerRoomsError;
           setRooms((managerRooms || []) as HotelRoom[]);
-          const { data: reservations, error: reservationError } = await supabase.from("hotel_bookings").select("id,confirmation_number,room_id,check_in,check_out,guest_first_name,guest_last_name,guest_email,guest_count,booking_status,payment_status,total_amount,currency_code,books_accounting_status,books_accounting_error,hotel_rooms(name),hotel_payment_attempts(status)").eq("organization_id", organizationId).order("created_at", { ascending: false }).limit(50);
+          const { data: reservations, error: reservationError } = await supabase.from("hotel_bookings").select("id,confirmation_number,room_id,check_in,check_out,guest_first_name,guest_last_name,guest_email,guest_count,booking_status,payment_status,total_amount,currency_code,books_accounting_status,books_accounting_error,hotel_rooms(name),hotel_payment_attempts(status)").eq("organization_id", bookingData.tenant.organizationId).order("created_at", { ascending: false }).limit(50);
           if (reservationError) throw reservationError;
           setManagerBookings((reservations || []) as unknown as ManagerBooking[]);
         }
@@ -140,18 +141,21 @@ const BookingPage = () => {
     }
     let active = true;
     const loadAvailability = async () => {
-      const { data, error } = await supabase.rpc("get_hotel_room_availability", {
-        target_check_in: format(checkIn, "yyyy-MM-dd"),
-        target_check_out: format(checkOut, "yyyy-MM-dd"),
+      const availabilityResponse = await fetch("/api/hotel-availability", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ checkIn: format(checkIn, "yyyy-MM-dd"), checkOut: format(checkOut, "yyyy-MM-dd") }),
+        cache: "no-store",
       });
+      const payload = await availabilityResponse.json().catch(() => null) as { availability?: Array<{ room_id: string; remaining_units: number }> } | null;
       if (!active) return;
-      if (error) {
+      if (!availabilityResponse.ok || !payload?.availability) {
         setRoomAvailability(null);
         setAvailabilityError(true);
         return;
       }
       setAvailabilityError(false);
-      setRoomAvailability(Object.fromEntries((data || []).map((row: { room_id: string; remaining_units: number }) => [row.room_id, Number(row.remaining_units)])));
+      setRoomAvailability(Object.fromEntries(payload.availability.map((row) => [row.room_id, Number(row.remaining_units)])));
     };
     void loadAvailability();
     return () => { active = false; };

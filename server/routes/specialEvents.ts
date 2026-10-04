@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { RequestHandler } from "express";
+import { resolveRequestHotelTenant } from "./hotelTenant.js";
 
 const flutterwaveBaseUrl = "https://api.flutterwave.com/v3";
 const flutterwaveReturnPath = "/checkout/flutterwave-return";
@@ -12,6 +13,7 @@ export class SpecialEventPaymentError extends Error {
 
 type SpecialBooking = {
   id: string;
+  organization_id: string;
   user_id: string;
   event_id: string;
   order_number: string;
@@ -61,7 +63,41 @@ const getConfiguration = () => {
   return { secretKey, secretHash, supabaseUrl, supabaseAnonKey, supabaseServiceRoleKey };
 };
 
-const getReturnUrl = () => {
+const getAuthenticatedEventUserId = async (authorization: string | undefined) => {
+  if (!authorization?.startsWith("Bearer ")) throw new SpecialEventPaymentError("Missing authenticated session", 401);
+  const { supabaseUrl, supabaseAnonKey } = getConfiguration();
+  const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
+    headers: { apikey: supabaseAnonKey, Authorization: authorization },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new SpecialEventPaymentError("Your sign-in session has expired", 401);
+  const user = await response.json() as { id?: string };
+  if (!user.id) throw new SpecialEventPaymentError("Your sign-in session could not be verified", 401);
+  return user.id;
+};
+
+const callTenantEventRpc = async <T>(name: string, args: Record<string, unknown>): Promise<T> => {
+  const { supabaseUrl, supabaseAnonKey, supabaseServiceRoleKey } = getConfiguration();
+  const response = await fetch(`${supabaseUrl}/rest/v1/rpc/${name}`, {
+    method: "POST",
+    headers: { ...restHeaders(supabaseServiceRoleKey, supabaseAnonKey, true), Prefer: "return=representation" },
+    body: JSON.stringify(args),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const payload = await response.json().catch(() => null) as T | { message?: string } | null;
+  if (!response.ok) throw new Error(payload && typeof payload === "object" && "message" in payload && typeof payload.message === "string" ? payload.message : "Unable to create event booking");
+  return payload as T;
+};
+
+const assertEventBookingTenant = async (request: Parameters<RequestHandler>[0], booking: SpecialBooking) => {
+  const tenant = await resolveRequestHotelTenant(request);
+  if (booking.organization_id !== tenant.organizationId) {
+    throw new SpecialEventPaymentError("This event booking is not available for this hotel", 404);
+  }
+  return tenant;
+};
+
+const getReturnUrl = (domain: string) => {
   const value = process.env.NODE_ENV === "production"
     ? process.env.FLUTTERWAVE_RETURN_URL
     : process.env.FLUTTERWAVE_LOCAL_RETURN_URL;
@@ -70,6 +106,7 @@ const getReturnUrl = () => {
   if (parsed.protocol !== "https:" || parsed.pathname !== flutterwaveReturnPath) {
     throw new Error("Flutterwave return URL must use HTTPS and target the payment return route");
   }
+  parsed.hostname = domain;
   return parsed.toString();
 };
 
@@ -182,6 +219,73 @@ const assertTransactionMatches = (transaction: FlutterwaveTransaction, attempt: 
   if (transaction.meta?.booking_id !== booking.id) throw new Error("Event payment metadata does not match the booking");
 };
 
+export const createSpecialEventBooking: RequestHandler = async (req, res) => {
+  try {
+    const tenant = await resolveRequestHotelTenant(req);
+    const userId = await getAuthenticatedEventUserId(req.headers.authorization);
+    const input = req.body as {
+      eventId?: string;
+      quantity?: number;
+      firstName?: string;
+      lastName?: string;
+      email?: string;
+      phone?: string | null;
+      specialRequests?: string | null;
+      ticketTypeId?: string | null;
+      idempotencyKey?: string;
+      attendeeNames?: string[];
+      invitationId?: string | null;
+      shareToken?: string | null;
+    };
+    if (!input.eventId || !/^[0-9a-f-]{36}$/i.test(input.eventId)
+      || !Number.isInteger(input.quantity) || !input.idempotencyKey || !/^[0-9a-f-]{8}-[0-9a-f-]{4}-[0-9a-f-]{4}-[0-9a-f-]{4}-[0-9a-f-]{12}$/i.test(input.idempotencyKey)) {
+      throw new SpecialEventPaymentError("Event booking details are invalid");
+    }
+    const rows = await callTenantEventRpc<Array<{ booking_id: string; order_number: string; total_amount: number; currency: string }>>(
+      "create_special_event_booking_for_tenant",
+      {
+        target_organization_id: tenant.organizationId,
+        target_user_id: userId,
+        target_event_id: input.eventId,
+        target_quantity: input.quantity,
+        guest_first_name: input.firstName,
+        guest_last_name: input.lastName,
+        guest_email: input.email,
+        guest_phone: input.phone || null,
+        special_requests: input.specialRequests || null,
+        target_ticket_type_id: input.ticketTypeId || null,
+        target_idempotency_key: input.idempotencyKey,
+        target_attendee_names: input.attendeeNames || null,
+        target_invitation_id: input.invitationId || null,
+        target_share_token: input.shareToken || null,
+      },
+    );
+    const [booking] = rows;
+    if (!booking) throw new Error("Event booking was not returned");
+    return res.status(201).json(booking);
+  } catch (error) {
+    return res.status(error instanceof SpecialEventPaymentError ? error.status : 400).json({ error: error instanceof Error ? error.message : "Unable to create event booking" });
+  }
+};
+
+export const confirmFreeSpecialEventBooking: RequestHandler = async (req, res) => {
+  try {
+    const tenant = await resolveRequestHotelTenant(req);
+    const userId = await getAuthenticatedEventUserId(req.headers.authorization);
+    const { bookingId } = req.body as { bookingId?: string };
+    if (!bookingId || !/^[0-9a-f-]{36}$/i.test(bookingId)) throw new SpecialEventPaymentError("Event booking is invalid");
+    const rows = await callTenantEventRpc<Array<{ booking_id: string; confirmation_number: string; ticket_code: string; ticket_count: number }>>(
+      "confirm_free_special_event_booking_for_tenant",
+      { target_organization_id: tenant.organizationId, target_user_id: userId, target_booking_id: bookingId },
+    );
+    const [confirmation] = rows;
+    if (!confirmation) throw new Error("Event confirmation was not returned");
+    return res.json(confirmation);
+  } catch (error) {
+    return res.status(error instanceof SpecialEventPaymentError ? error.status : 400).json({ error: error instanceof Error ? error.message : "Unable to confirm free event booking" });
+  }
+};
+
 export const prepareSpecialEventPayment: RequestHandler = async (req, res) => {
   let bookingId: string | undefined;
   let txRef: string | undefined;
@@ -189,6 +293,7 @@ export const prepareSpecialEventPayment: RequestHandler = async (req, res) => {
     bookingId = (req.body as { bookingId?: string }).bookingId;
     if (!bookingId) throw new SpecialEventPaymentError("Booking ID is required");
     const booking = await getBooking(bookingId, req.headers.authorization);
+    const tenant = await assertEventBookingTenant(req, booking);
     if (booking.payment_status === "paid") throw new SpecialEventPaymentError("This event booking has already been paid", 409);
     if (booking.status !== "pending" || booking.payment_status !== "pending") throw new SpecialEventPaymentError("This event booking is no longer pending", 409);
     if (booking.expires_at && new Date(booking.expires_at).getTime() <= Date.now()) throw new SpecialEventPaymentError("This ticket hold has expired. Start a new booking.", 409);
@@ -231,7 +336,7 @@ export const prepareSpecialEventPayment: RequestHandler = async (req, res) => {
         amount: Number(booking.total_amount),
         currency: booking.currency,
         payment_options: "card",
-        redirect_url: getReturnUrl(),
+        redirect_url: getReturnUrl(tenant.domain),
         customer: { email: booking.guest_email, name: `${booking.guest_first_name} ${booking.guest_last_name}`.trim(), phonenumber: booking.guest_phone },
         meta: { booking_id: booking.id, order_number: booking.order_number },
         customizations: { title: "Special Events", description: `Event booking ${booking.order_number}` },
@@ -257,6 +362,7 @@ export const verifySpecialEventPayment: RequestHandler = async (req, res) => {
     if (!transactionId || !txRef) return res.status(400).json({ error: "Event payment verification details are required" });
     const attempt = await getPaymentAttemptAsService(txRef);
     const booking = await getBooking(attempt.booking_id, req.headers.authorization);
+    await assertEventBookingTenant(req, booking);
     const transaction = await verifyTransaction(String(transactionId));
     assertTransactionMatches(transaction, attempt, booking);
     if (attempt.status !== "successful" && attempt.status !== "manual_review") {
@@ -274,7 +380,8 @@ export const cancelSpecialEventPayment: RequestHandler = async (req, res) => {
     const { txRef, status } = req.body as { txRef?: string; status?: "cancelled" | "failed" };
     if (!txRef || (status !== "cancelled" && status !== "failed")) return res.status(400).json({ error: "Event payment outcome is invalid" });
     const attempt = await getPaymentAttemptAsService(txRef);
-    await getBooking(attempt.booking_id, req.headers.authorization);
+    const booking = await getBooking(attempt.booking_id, req.headers.authorization);
+    await assertEventBookingTenant(req, booking);
     if (attempt.status === "successful" || attempt.status === "manual_review") {
       return res.json({ bookingId: attempt.booking_id, paymentStatus: attempt.status });
     }

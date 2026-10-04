@@ -9,6 +9,8 @@ import {
 } from "./routes/flutterwave.js";
 import {
   cancelSpecialEventPayment,
+  confirmFreeSpecialEventBooking,
+  createSpecialEventBooking,
   handleSpecialEventWebhook,
   prepareSpecialEventPayment,
   verifySpecialEventPayment,
@@ -24,6 +26,13 @@ import {
   verifyHotelBookingPayment,
 } from "./routes/hotelBookings.js";
 import { createMenuOrder } from "./routes/menuOrders.js";
+import {
+  getHotelTenant,
+  getPublicHotelBookingData,
+  getPublicMenuItems,
+  getPublicSpecialEvents,
+  getTenantRoomAvailability,
+} from "./routes/hotelTenant.js";
 
 export function createServer() {
   const app = express();
@@ -39,6 +48,13 @@ export function createServer() {
   });
 
   app.get("/api/demo", handleDemo);
+  app.get("/api/hotel-tenant", getHotelTenant);
+  app.get("/api/hotel-booking-data", getPublicHotelBookingData);
+  app.get("/api/hotel-menu-items", getPublicMenuItems);
+  app.get("/api/hotel-events", getPublicSpecialEvents);
+  app.post("/api/hotel-availability", getTenantRoomAvailability);
+  app.post("/api/special-events/bookings/create", createSpecialEventBooking);
+  app.post("/api/special-events/bookings/confirm-free", confirmFreeSpecialEventBooking);
   app.post("/api/payments/flutterwave/hosted-session", createFlutterwaveHostedSession);
   app.post("/api/payments/flutterwave/cancel", cancelFlutterwavePayment);
   app.post("/api/payments/flutterwave/verify", verifyFlutterwavePayment);

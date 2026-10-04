@@ -9,7 +9,7 @@ import { Textarea } from "../components/ui/textarea";
 import { Badge } from "../components/ui/badge";
 import { supabase } from "../lib/supabase";
 import { menuItemFromDatabaseRow, MenuCategory, MenuItem } from "../lib/menuData";
-import { getCachedHomeIdentity } from "../lib/homeIdentity";
+import { useHotelTenant } from "../lib/hotelTenant";
 import { useFileUpload } from "../hooks/useFileUpload";
 
 const emptyForm = {
@@ -48,40 +48,37 @@ type PendingMenuProvider = {
 };
 
 const MenuManagementPage = () => {
+  const { tenant, loading: tenantLoading } = useHotelTenant();
   const navigate = useNavigate();
   const [authorized, setAuthorized] = useState<boolean | null>(null);
   const [isManager, setIsManager] = useState(false);
   const [pendingProviders, setPendingProviders] = useState<PendingMenuProvider[]>([]);
   const [items, setItems] = useState<MenuItem[]>([]);
-  const [hotelOrganizations, setHotelOrganizations] = useState<Array<{ id: string; name: string }>>([]);
-  const [selectedOrganizationId, setSelectedOrganizationId] = useState("");
   const [form, setForm] = useState<FormState>(emptyForm);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const { uploadFile, isUploading } = useFileUpload();
 
   useEffect(() => {
+    if (tenantLoading) return;
     const loadAccess = async () => {
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
+      if (!user || !tenant) {
         setAuthorized(false);
         return;
       }
 
-      const { data: profile } = await supabase
-        .from("user_profiles")
-        .select("role, menu_access_role, menu_access_approved")
-        .eq("user_id", user.id)
-        .maybeSingle();
-
-      const cachedRole = getCachedHomeIdentity()?.role;
-      const manager = profile?.role === "manager";
-      const canManage = manager ||
-        (profile?.role === "service_provider" &&
-          profile.menu_access_approved === true &&
-          (profile.menu_access_role === "chef" || profile.menu_access_role === "food_beverage_manager")) ||
-        (!profile?.role && cachedRole === "manager");
-      setIsManager(manager);
+      const [{ data: profile }, { data: membership }] = await Promise.all([
+        supabase.from("user_profiles").select("role, menu_access_role, menu_access_approved").eq("user_id", user.id).maybeSingle(),
+        supabase.from("books_memberships").select("role").eq("user_id", user.id).eq("organization_id", tenant.organizationId).in("role", ["owner", "admin", "provider"]).maybeSingle(),
+      ]);
+      const manager = profile?.role === "manager" && (membership?.role === "owner" || membership?.role === "admin");
+      const approvedProvider = profile?.role === "service_provider"
+        && profile.menu_access_approved === true
+        && (profile.menu_access_role === "chef" || profile.menu_access_role === "food_beverage_manager")
+        && membership?.role === "provider";
+      const canManage = Boolean(manager || approvedProvider);
+      setIsManager(Boolean(manager));
       setAuthorized(canManage);
       if (manager) {
         const { data: providers } = await supabase
@@ -93,35 +90,18 @@ const MenuManagementPage = () => {
           .order("created_at", { ascending: true });
         setPendingProviders((providers || []) as PendingMenuProvider[]);
       }
-      if (manager) {
-        const { data: memberships } = await supabase
-          .from("books_memberships")
-          .select("organization_id")
-          .eq("user_id", user.id)
-          .in("role", ["owner", "admin", "manager"]);
-        const organizationIds = [...new Set((memberships || []).map((membership) => membership.organization_id))];
-        if (organizationIds.length) {
-          const { data: organizations } = await supabase
-            .from("books_organizations")
-            .select("id,name")
-            .in("id", organizationIds)
-            .order("name");
-          const choices = (organizations || []).map((organization) => ({ id: organization.id, name: organization.name }));
-          setHotelOrganizations(choices);
-          setSelectedOrganizationId(choices.length === 1 ? choices[0].id : "");
-        }
-      }
       if (canManage) {
         const { data: databaseItems } = await supabase
           .from("menu_items")
           .select("*")
+          .eq("organization_id", tenant.organizationId)
           .order("created_at", { ascending: true });
         setItems((databaseItems || []).map(menuItemFromDatabaseRow));
       }
     };
 
     loadAccess().catch(() => setAuthorized(false));
-  }, []);
+  }, [tenantLoading, tenant?.organizationId]);
 
   useEffect(() => {
     if (authorized === false) navigate("/menu", { replace: true });
@@ -152,12 +132,10 @@ const MenuManagementPage = () => {
   const resetForm = () => {
     setForm(emptyForm);
     setEditingId(null);
-    setSelectedOrganizationId(hotelOrganizations.length === 1 ? hotelOrganizations[0].id : "");
   };
 
   const editItem = (item: MenuItem) => {
     setEditingId(item.id);
-    setSelectedOrganizationId(item.organizationId || "");
     setForm({
       name: item.name,
       description: item.description,
@@ -186,7 +164,7 @@ const MenuManagementPage = () => {
 
   const saveItem = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (isSaving) return;
+    if (!tenant || isSaving) return;
     setIsSaving(true);
     const price = Number(form.price);
     const originalPrice = Number(form.originalPrice) || price;
@@ -220,7 +198,7 @@ const MenuManagementPage = () => {
       dietary: form.dietary.split(",").map((value) => value.trim()).filter(Boolean),
       spiceLevel: 0,
       popularity: 0,
-      origin: form.origin.trim() || "Sheraton Kitchen",
+      origin: form.origin.trim() || `${tenant?.name || "Hotel"} Kitchen`,
       calories: Number(form.calories) || 0,
       chef_note: form.chef_note.trim(),
       special_offer: form.isSpecial ? form.special_offer.trim() || "Special offer" : null,
@@ -254,7 +232,7 @@ const MenuManagementPage = () => {
       media_url: nextItem.mediaUrl || null,
       media_attachment_id: nextItem.mediaAttachmentId || null,
       managed_by: (await supabase.auth.getUser()).data.user?.id,
-      organization_id: selectedOrganizationId || null,
+      organization_id: tenant?.organizationId,
     };
 
     const databaseQuery = nextItem.databaseId
@@ -262,6 +240,7 @@ const MenuManagementPage = () => {
           .from("menu_items")
           .update(databasePayload)
           .eq("id", nextItem.databaseId)
+          .eq("organization_id", tenant?.organizationId)
           .select()
           .single()
       : supabase.from("menu_items").insert(databasePayload).select().single();
@@ -298,7 +277,8 @@ const MenuManagementPage = () => {
     const { error } = await supabase
       .from("menu_items")
       .update({ is_trending: !item.trending })
-      .eq("id", item.databaseId);
+      .eq("id", item.databaseId)
+      .eq("organization_id", tenant?.organizationId);
 
     if (!error) {
       setItems((current) => current.map((entry) => entry.id === id ? { ...entry, trending: !item.trending } : entry));
@@ -312,7 +292,8 @@ const MenuManagementPage = () => {
     const { error } = await supabase
       .from("menu_items")
       .update({ is_published: !item.approved })
-      .eq("id", item.databaseId);
+      .eq("id", item.databaseId)
+      .eq("organization_id", tenant?.organizationId);
 
     if (!error) {
       setItems((current) => current.map((entry) => entry.id === id ? { ...entry, approved: !item.approved } : entry));
@@ -326,7 +307,8 @@ const MenuManagementPage = () => {
     const { error } = await supabase
       .from("menu_items")
       .delete()
-      .eq("id", item.databaseId);
+      .eq("id", item.databaseId)
+      .eq("organization_id", tenant?.organizationId);
 
     if (!error) {
       setItems((current) => current.filter((entry) => entry.id !== id));
@@ -389,15 +371,7 @@ const MenuManagementPage = () => {
           </CardHeader>
           <CardContent>
             <form onSubmit={saveItem} className="grid grid-cols-1 md:grid-cols-2 gap-5">
-              {isManager && hotelOrganizations.length > 0 && (
-                <div className="space-y-2 md:col-span-2">
-                  <Label htmlFor="menu-hotel">Hotel ownership</Label>
-                  <select id="menu-hotel" value={selectedOrganizationId} onChange={(event) => setSelectedOrganizationId(event.target.value)} className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm">
-                    <option value="">Unassigned (not eligible for hotel rewards)</option>
-                    {hotelOrganizations.map((organization) => <option key={organization.id} value={organization.id}>{organization.name}</option>)}
-                  </select>
-                </div>
-              )}
+              {tenant && <div className="md:col-span-2 rounded-md border px-3 py-2 text-sm text-muted-foreground">Hotel: {tenant.name}</div>}
               <div className="space-y-2"><Label htmlFor="name">Dish name *</Label><Input id="name" value={form.name} onChange={(e) => updateField("name", e.target.value)} required /></div>
               <div className="space-y-2"><Label htmlFor="image">Dish icon</Label><select id="image" className="w-full h-10 rounded-md border bg-background px-3 text-sm" value={form.image} onChange={(e) => updateField("image", e.target.value)}><option value="🍽️">🍽️ General dish</option><option value="🍝">🍝 Pasta</option><option value="🥩">🥩 Steak</option><option value="🦞">🦞 Seafood</option><option value="🍲">🍲 Soup</option><option value="🍕">🍕 Pizza</option><option value="🥗">🥗 Salad</option><option value="🍔">🍔 Burger</option><option value="🍰">🍰 Dessert</option><option value="🍫">🍫 Chocolate</option><option value="🍸">🍸 Cocktail</option><option value="🍉">🍉 Fruit</option><option value="☕">☕ Coffee</option></select></div>
               <div className="space-y-2"><Label htmlFor="currency">Currency</Label><select id="currency" className="w-full h-10 rounded-md border bg-background px-3 text-sm" value={form.currency} onChange={(e) => updateField("currency", e.target.value)}><option value="USD">USD — US Dollar ($)</option><option value="EUR">EUR — Euro (€)</option><option value="GBP">GBP — British Pound (£)</option><option value="CAD">CAD — Canadian Dollar ($)</option><option value="AUD">AUD — Australian Dollar ($)</option><option value="JPY">JPY — Japanese Yen (¥)</option><option value="CHF">CHF — Swiss Franc</option><option value="CNY">CNY — Chinese Yuan (¥)</option><option value="INR">INR — Indian Rupee (₹)</option><option value="RWF">RWF — Rwandan Franc</option><option value="KES">KES — Kenyan Shilling</option><option value="TZS">TZS — Tanzanian Shilling</option><option value="CDF">CDF — Congolese Franc</option><option value="UGX">UGX — Ugandan Shilling</option><option value="ZAR">ZAR — South African Rand</option><option value="AED">AED — UAE Dirham</option><option value="SGD">SGD — Singapore Dollar</option></select></div>

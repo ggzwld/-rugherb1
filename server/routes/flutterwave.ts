@@ -1,4 +1,5 @@
 import type { Request, RequestHandler } from "express";
+import { resolveRequestHotelTenant } from "./hotelTenant.js";
 
 const flutterwaveBaseUrl = "https://api.flutterwave.com/v3";
 const flutterwaveReturnPath = "/checkout/flutterwave-return";
@@ -9,7 +10,7 @@ export class FlutterwaveRequestError extends Error {
   }
 }
 
-const getFlutterwaveReturnUrl = () => {
+const getFlutterwaveReturnUrl = (domain: string) => {
   const returnUrl =
     process.env.NODE_ENV === "production"
       ? process.env.FLUTTERWAVE_RETURN_URL
@@ -22,11 +23,13 @@ const getFlutterwaveReturnUrl = () => {
     throw new Error("Flutterwave return URL must use HTTPS and target the payment return route");
   }
 
+  parsedUrl.hostname = domain;
   return parsedUrl.toString();
 };
 
 type MenuOrder = {
   id: string;
+  organization_id: string;
   user_id: string;
   order_number: string;
   payment_method: string;
@@ -309,12 +312,17 @@ const createMenuPaymentAttempt = async (order: MenuOrder, txRef: string) => {
 export const prepareFlutterwaveHostedSession = async (
   { orderId }: FlutterwaveHostedSessionInput,
   authorization?: string,
+  tenantOrganizationId: string,
+  tenantDomain: string,
 ) => {
   let txRef: string | undefined;
 
   try {
     if (!orderId) throw new Error("Order ID is required");
     const order = await getAuthenticatedOrder(orderId, authorization);
+    if (order.organization_id !== tenantOrganizationId) {
+      throw new FlutterwaveRequestError("This order is not available for this hotel", 404);
+    }
     if (order.payment_status === "paid") {
       throw new FlutterwaveRequestError("This order has already been paid", 409);
     }
@@ -347,7 +355,7 @@ export const prepareFlutterwaveHostedSession = async (
         amount,
         currency,
         payment_options: getPaymentOptions(order.payment_method, currency),
-        redirect_url: getFlutterwaveReturnUrl(),
+        redirect_url: getFlutterwaveReturnUrl(tenantDomain),
         customer: {
           email: order.email,
           name: `${order.first_name} ${order.last_name}`.trim(),
@@ -377,9 +385,12 @@ export const prepareFlutterwaveHostedSession = async (
 
 export const createFlutterwaveHostedSession: RequestHandler = async (req, res) => {
   try {
+    const tenant = await resolveRequestHotelTenant(req);
     const paymentSession = await prepareFlutterwaveHostedSession(
       req.body as FlutterwaveHostedSessionInput,
       req.headers.authorization,
+      tenant.organizationId,
+      tenant.domain,
     );
     return res.json(paymentSession);
   } catch (error) {
@@ -401,9 +412,11 @@ export const cancelFlutterwavePayment: RequestHandler = async (req, res) => {
       return res.status(400).json({ error: "Payment outcome is invalid" });
     }
 
+    const tenant = await resolveRequestHotelTenant(req);
     const attempt = await getPaymentAttempt(txRef);
     const order = await getOrderByIdAsService(attempt.order_id);
-    await getAuthenticatedOrder(order.id, req.headers.authorization);
+    const authenticatedOrder = await getAuthenticatedOrder(order.id, req.headers.authorization);
+    if (authenticatedOrder.organization_id !== tenant.organizationId) throw new FlutterwaveRequestError("This order is not available for this hotel", 404);
     if (attempt.status === "completed" || attempt.status === "manual_review" || order.payment_status === "paid") {
       return res.json({ orderId: order.id, paymentStatus: order.payment_status });
     }
@@ -419,7 +432,7 @@ export const cancelFlutterwavePayment: RequestHandler = async (req, res) => {
     return res.json({ orderId: order.id, paymentStatus: status });
   } catch (error) {
     console.error("Flutterwave payment cancellation error", error);
-    return res.status(400).json({
+    return res.status(error instanceof FlutterwaveRequestError ? error.status : 400).json({
       error: error instanceof Error ? error.message : "Unable to record payment cancellation",
     });
   }
@@ -435,8 +448,10 @@ export const verifyFlutterwavePayment: RequestHandler = async (req, res) => {
       return res.status(400).json({ error: "Payment verification details are required" });
     }
 
+    const tenant = await resolveRequestHotelTenant(req);
     const order = await getOrderByPaymentReference(txRef);
-    await getAuthenticatedOrder(order.id, req.headers.authorization);
+    const authenticatedOrder = await getAuthenticatedOrder(order.id, req.headers.authorization);
+    if (authenticatedOrder.organization_id !== tenant.organizationId) throw new FlutterwaveRequestError("This order is not available for this hotel", 404);
     const transaction = await verifyTransaction(String(transactionId));
     const result = await confirmPayment(transaction, txRef, order);
 
@@ -447,7 +462,7 @@ export const verifyFlutterwavePayment: RequestHandler = async (req, res) => {
     });
   } catch (error) {
     console.error("Flutterwave payment verification error", error);
-    return res.status(400).json({
+    return res.status(error instanceof FlutterwaveRequestError ? error.status : 400).json({
       error: error instanceof Error ? error.message : "Unable to verify payment",
     });
   }

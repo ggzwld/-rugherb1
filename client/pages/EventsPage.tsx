@@ -27,6 +27,7 @@ import EventCheckoutModal from "../components/events/EventCheckoutModal";
 import TicketQr from "../components/events/TicketQr";
 import { useFileUpload } from "../hooks/useFileUpload";
 import { supabase } from "../lib/supabase";
+import { useHotelTenant } from "../lib/hotelTenant";
 import {
   formatEventDate,
   formatEventDay,
@@ -102,7 +103,6 @@ type EventForm = {
   endsAt: string;
   timezone: string;
   facilityId: string;
-  organizationId: string;
   price: string;
   currency: string;
   capacity: string;
@@ -120,7 +120,6 @@ const initialEventForm: EventForm = {
   endsAt: "",
   timezone: "Africa/Kampala",
   facilityId: "",
-  organizationId: "",
   price: "0",
   currency: "UGX",
   capacity: "",
@@ -168,6 +167,7 @@ const dateTimeInputInEventZone = (instant: string, timezone: string) => {
 };
 
 const EventsPage: React.FC = () => {
+  const { tenant, loading: tenantLoading } = useHotelTenant();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const invitationToken = searchParams.get("invite");
@@ -192,7 +192,7 @@ const EventsPage: React.FC = () => {
   const [proposalQueue, setProposalQueue] = useState<SpecialEventPlan[]>([]);
   const [scheduledProposals, setScheduledProposals] = useState<SpecialEventPlan[]>([]);
   const [facilities, setFacilities] = useState<Array<{ id: string; name: string }>>([]);
-  const [hotelOrganizations, setHotelOrganizations] = useState<Array<{ id: string; name: string }>>([]);
+  const [canManageEvents, setCanManageEvents] = useState(false);
   const [proposalReviewForms, setProposalReviewForms] = useState<Record<string, ProposalReviewForm>>({});
   const [proposalReviewNotes, setProposalReviewNotes] = useState<Record<string, string>>({});
   const [inviteEmails, setInviteEmails] = useState<Record<string, string>>({});
@@ -210,7 +210,6 @@ const EventsPage: React.FC = () => {
   const [retryingBookingId, setRetryingBookingId] = useState<string | null>(null);
   const [isSignedIn, setIsSignedIn] = useState(false);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
-  const [profileRole, setProfileRole] = useState<string | null>(null);
   const [eventForm, setEventForm] = useState<EventForm>(initialEventForm);
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
@@ -221,6 +220,7 @@ const EventsPage: React.FC = () => {
   const pendingPlanScrollId = useRef<string | null>(null);
 
   const loadUserData = async (userId: string | null) => {
+    if (!tenant) return;
     if (!userId) {
       setIsSignedIn(false);
       setCurrentUserId(null);
@@ -236,8 +236,7 @@ const EventsPage: React.FC = () => {
       setProposalQueue([]);
       setScheduledProposals([]);
       setFacilities([]);
-      setHotelOrganizations([]);
-      setProfileRole(null);
+      setCanManageEvents(false);
       return;
     }
 
@@ -246,7 +245,7 @@ const EventsPage: React.FC = () => {
     const [profileResult, favoritesResult, bookingsResult, plansResult, staffResult, facilitiesResult, proposalQueueResult, invitationsResult, incomingInvitationsResult] = await Promise.all([
       supabase.from("user_profiles").select("role,first_name,last_name,email,phone").eq("user_id", userId).maybeSingle(),
       supabase.from("special_event_favorites").select("event_id").eq("user_id", userId),
-      supabase.from("special_event_bookings").select("*").eq("user_id", userId).order("created_at", { ascending: false }),
+      supabase.from("special_event_bookings").select("*").eq("user_id", userId).eq("organization_id", tenant.organizationId).order("created_at", { ascending: false }),
       supabase.from("special_event_plans").select("*").eq("user_id", userId).order("event_date", { ascending: true }),
       supabase.from("special_event_staff").select("event_id").eq("user_id", userId).eq("status", "active"),
       supabase.from("special_event_facilities").select("id,name").eq("is_active", true).order("display_order"),
@@ -275,24 +274,16 @@ const EventsPage: React.FC = () => {
       : { data: [], error: null };
     if (ticketResult.error) throw ticketResult.error;
     const role = profileResult.data?.role || null;
-    setProfileRole(role);
     setFacilities((facilitiesResult.data || []) as Array<{ id: string; name: string }>);
-    if (role === "manager" || role === "admin") {
-      const { data: memberships } = await supabase.from("books_memberships").select("organization_id")
-        .eq("user_id", userId).in("role", ["owner", "admin", "manager"]);
-      const organizationIds = [...new Set((memberships || []).map((membership) => membership.organization_id))];
-      const { data: organizations } = organizationIds.length
-        ? await supabase.from("books_organizations").select("id,name").in("id", organizationIds).order("name")
-        : { data: [] };
-      const choices = (organizations || []).map((organization) => ({ id: organization.id, name: organization.name }));
-      setHotelOrganizations(choices);
-      if (choices.length === 1) setEventForm((form) => form.organizationId ? form : { ...form, organizationId: choices[0].id });
-    } else {
-      setHotelOrganizations([]);
-    }
+    const { data: membership } = role === "manager" || role === "admin"
+      ? await supabase.from("books_memberships").select("organization_id")
+        .eq("user_id", userId).eq("organization_id", tenant.organizationId).in("role", ["owner", "admin"]).maybeSingle()
+      : { data: null };
+    const canManageTenantEvents = Boolean(tenant && membership);
+    setCanManageEvents(canManageTenantEvents);
     const reviewRows = (proposalQueueResult.data || []) as SpecialEventPlan[];
-    setProposalQueue(role === "manager" || role === "admin" ? reviewRows.filter((plan) => plan.status === "submitted") : []);
-    setScheduledProposals(role === "manager" || role === "admin" ? reviewRows.filter((plan) => plan.status === "scheduled") : []);
+    setProposalQueue(canManageTenantEvents ? reviewRows.filter((plan) => plan.status === "submitted") : []);
+    setScheduledProposals(canManageTenantEvents ? reviewRows.filter((plan) => plan.status === "scheduled") : []);
     setPlanForm((form) => ({
       ...form,
       contactName: form.contactName || [profileResult.data?.first_name, profileResult.data?.last_name].filter(Boolean).join(" "),
@@ -315,20 +306,15 @@ const EventsPage: React.FC = () => {
     setIsLoading(true);
     setErrorMessage("");
     try {
-      const [{ data: eventRows, error: eventsError }, { data: authData }] = await Promise.all([
-        supabase
-          .from("special_events")
-          .select("*")
-          .eq("status", "published")
-          .eq("is_private", false)
-          .gte("starts_at", new Date().toISOString())
-          .order("featured", { ascending: false })
-          .order("starts_at", { ascending: true }),
+      if (!tenant) throw new Error("This hotel domain is not configured.");
+      const [eventsResponse, { data: authData }] = await Promise.all([
+        fetch("/api/hotel-events", { cache: "no-store" }),
         supabase.auth.getUser(),
       ]);
-      if (eventsError) throw eventsError;
+      const eventPayload = await eventsResponse.json().catch(() => null) as { events?: SpecialEvent[]; error?: string } | null;
+      if (!eventsResponse.ok || !eventPayload?.events) throw new Error(eventPayload?.error || "Events are not available right now.");
       await loadUserData(authData.user?.id || null);
-      setEvents((eventRows || []) as SpecialEvent[]);
+      setEvents(eventPayload.events);
     } catch (error) {
       console.error("Unable to load special events", error);
       setErrorMessage("Events are not available right now. Please try again shortly.");
@@ -392,6 +378,7 @@ const EventsPage: React.FC = () => {
   }, [activeTab, plans]);
 
   useEffect(() => {
+    if (tenantLoading) return;
     void loadEvents();
     const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
       void loadUserData(session?.user?.id || null).catch((error) => {
@@ -410,7 +397,7 @@ const EventsPage: React.FC = () => {
       authListener.subscription.unsubscribe();
       void proposalChannel.unsubscribe();
     };
-  }, []);
+  }, [tenantLoading, tenant?.organizationId]);
 
   const eventCategories = useMemo(() => {
     const categories = events.map((event) => event.category).filter((category): category is string => Boolean(category));
@@ -432,7 +419,6 @@ const EventsPage: React.FC = () => {
   const getEvent = (eventId: string) => [...events, ...linkedEvents, ...bookedEvents, ...(sharedEvent ? [sharedEvent] : [])].find((event) => event.id === eventId);
   const getTotalEventItems = () => Object.values(eventCart).reduce((total, count) => total + count, 0);
 
-  const canManageEvents = profileRole === "manager" || profileRole === "admin";
 
   const requireAuth = () => {
     if (isSignedIn) return true;
@@ -689,7 +675,7 @@ const EventsPage: React.FC = () => {
 
   const saveManagedEvent = async () => {
     if (!requireAuth() || !canManageEvents) return;
-    if (!eventForm.title.trim() || !eventForm.startsAt || !eventForm.endsAt || !eventForm.facilityId || !eventForm.price || !eventForm.capacity || (hotelOrganizations.length > 1 && !eventForm.organizationId)) {
+    if (!tenant || !eventForm.title.trim() || !eventForm.startsAt || !eventForm.endsAt || !eventForm.facilityId || !eventForm.price || !eventForm.capacity) {
       setNotice("Complete the event title, dates, facility, price, and capacity.");
       return;
     }
@@ -707,7 +693,7 @@ const EventsPage: React.FC = () => {
         timezone: eventForm.timezone.trim() || "UTC",
         location: facilities.find((facility) => facility.id === eventForm.facilityId)?.name || "",
         facility_id: eventForm.facilityId,
-        organization_id: eventForm.organizationId || (hotelOrganizations.length === 1 ? hotelOrganizations[0].id : null),
+        organization_id: tenant.organizationId,
         price: Number(eventForm.price),
         currency: eventForm.currency.trim().toUpperCase(),
         capacity: Number(eventForm.capacity),
@@ -721,7 +707,7 @@ const EventsPage: React.FC = () => {
         created_by: authData.user.id,
       };
       const result = editingEventId
-        ? await supabase.from("special_events").update(values).eq("id", editingEventId).eq("created_by", authData.user.id)
+        ? await supabase.from("special_events").update(values).eq("id", editingEventId).eq("created_by", authData.user.id).eq("organization_id", tenant.organizationId)
         : await supabase.from("special_events").insert(values);
       if (result.error) throw result.error;
       setEventForm(initialEventForm);
@@ -738,7 +724,7 @@ const EventsPage: React.FC = () => {
 
   const editManagedEvent = (event: SpecialEvent) => {
     setEditingEventId(event.id);
-    setEventForm({ title: event.title, description: event.description || "", category: event.category || "Fine Dining", startsAt: dateTimeInputInEventZone(event.starts_at, event.timezone), endsAt: dateTimeInputInEventZone(event.ends_at, event.timezone), timezone: event.timezone, facilityId: event.facility_id || facilities.find((facility) => facility.name === event.location)?.id || "", organizationId: event.organization_id || "", price: String(event.price), currency: event.currency, capacity: String(event.capacity), maxTicketsPerOrder: String(event.max_tickets_per_order || 10), hostName: event.host_name || "", imageUrl: event.image_url || "", featured: event.featured });
+    setEventForm({ title: event.title, description: event.description || "", category: event.category || "Fine Dining", startsAt: dateTimeInputInEventZone(event.starts_at, event.timezone), endsAt: dateTimeInputInEventZone(event.ends_at, event.timezone), timezone: event.timezone, facilityId: event.facility_id || facilities.find((facility) => facility.name === event.location)?.id || "", price: String(event.price), currency: event.currency, capacity: String(event.capacity), maxTicketsPerOrder: String(event.max_tickets_per_order || 10), hostName: event.host_name || "", imageUrl: event.image_url || "", featured: event.featured });
     setActiveTab("planning");
   };
 
@@ -746,7 +732,8 @@ const EventsPage: React.FC = () => {
     if (!requireAuth() || !canManageEvents) return;
     const { data: authData } = await supabase.auth.getUser();
     if (!authData.user) return;
-    const { error } = await supabase.from("special_events").update({ status: "cancelled" }).eq("id", eventId).eq("created_by", authData.user.id);
+    if (!tenant) return;
+    const { error } = await supabase.from("special_events").update({ status: "cancelled" }).eq("id", eventId).eq("created_by", authData.user.id).eq("organization_id", tenant.organizationId);
     if (error) setNotice("We could not cancel that event.");
     else await loadEvents();
   };
@@ -891,7 +878,7 @@ const EventsPage: React.FC = () => {
         {event.image_url ? <img src={event.image_url} alt={event.title} loading="lazy" className={featured ? "h-48 w-full object-cover" : "h-40 w-full object-cover"} /> : <div className={featured ? "h-48 bg-gradient-to-br from-sheraton-cream to-sheraton-pearl flex items-center justify-center" : "h-40 bg-gradient-to-br from-sheraton-cream to-sheraton-pearl flex items-center justify-center"}><Award className={featured ? "h-16 w-16 text-sheraton-gold" : "h-12 w-12 text-sheraton-gold"} /></div>}
         <div className={featured ? "p-6" : "p-4"}>
           {featured ? (
-            <div className="flex items-center gap-2 mb-2"><Star className="h-4 w-4 text-yellow-500 fill-current" /><span className="text-sm text-gray-600">{event.rating.toFixed(1)}</span><span className="text-sm text-gray-400">• {event.host_name || "Sheraton"}</span></div>
+            <div className="flex items-center gap-2 mb-2"><Star className="h-4 w-4 text-yellow-500 fill-current" /><span className="text-sm text-gray-600">{event.rating.toFixed(1)}</span><span className="text-sm text-gray-400">• {event.host_name || tenant?.name || "Hotel"}</span></div>
           ) : <Badge variant="outline" className="mb-2">{event.category || "Experience"}</Badge>}
           <h4 className="font-semibold text-sheraton-navy mb-2">{event.title}</h4>
           {featured && <p className="text-gray-600 text-sm mb-3">{event.description}</p>}
@@ -903,7 +890,7 @@ const EventsPage: React.FC = () => {
           <div className="flex items-center justify-between">
             <span className={featured ? "text-lg font-semibold text-sheraton-navy" : "font-semibold text-sheraton-navy"}>{formatEntry(event.price, event.currency)}</span>
             <div className="flex gap-2">
-              {(event.created_by === currentUserId || operationalEventIds.has(event.id) || profileRole === "admin") && <Button variant="outline" size="sm" onClick={() => navigate(`/events/operations/${event.id}`)}>Operations</Button>}
+              {(canManageEvents || operationalEventIds.has(event.id)) && <Button variant="outline" size="sm" onClick={() => navigate(`/events/operations/${event.id}`)}>Operations</Button>}
               {!event.is_private && <Button variant="outline" size="sm" onClick={() => void shareEvent(event)} aria-label="Share event"><Share2 className="h-4 w-4" /></Button>}
               <Button variant="outline" size="sm" onClick={() => void toggleFavorite(event.id)} aria-label={isFavorite ? "Remove saved event" : "Save event"}><Heart className={`h-4 w-4 ${isFavorite ? "fill-sheraton-gold text-sheraton-gold" : ""}`} /></Button>
               <Button variant={featured ? "default" : "outline"} size="sm" className={featured ? "bg-sheraton-gold hover:bg-sheraton-gold/90 text-sheraton-navy" : ""} onClick={() => { setSelectedEvent(event.id); if (featured) bookEvent(event); }}>{featured ? "Book Now" : "Details"}</Button>
@@ -968,7 +955,7 @@ const EventsPage: React.FC = () => {
       <div className="text-center mb-8"><h3 className="text-2xl font-semibold text-sheraton-navy mb-2">Event Planning Tools</h3><p className="text-gray-600">Professional tools to help you plan the perfect event</p></div>
       <div className="grid md:grid-cols-2 gap-6">{planningTools.map((tool) => <div key={tool.title} className="bg-white rounded-lg shadow-md p-6 hover:shadow-lg transition-shadow"><div className="flex items-center mb-4"><div className="p-3 bg-sheraton-cream rounded-lg mr-4"><tool.icon className="h-6 w-6 text-sheraton-navy" /></div><div><h4 className="font-semibold text-sheraton-navy">{tool.title}</h4><p className="text-sm text-gray-600">{tool.description}</p></div></div><Button onClick={() => setNotice(`${tool.title} will be connected to your submitted event proposal.`)} className="w-full bg-sheraton-gold hover:bg-sheraton-gold/90 text-sheraton-navy">{tool.action}</Button></div>)}</div>
 
-      {canManageEvents && <div className="bg-white rounded-lg shadow-md p-6"><div className="flex items-center justify-between mb-4"><div><h4 className="text-lg font-semibold text-sheraton-navy">Create a Hotel Event</h4><p className="text-sm text-gray-600">This price applies only to hotel-organized events; creators set fees for their own events.</p></div>{editingEventId && <Button variant="outline" onClick={() => { setEditingEventId(null); setEventForm(initialEventForm); }}>Cancel edit</Button>}</div><div className="grid md:grid-cols-2 gap-4"><Input value={eventForm.title} onChange={(event) => setEventForm((form) => ({ ...form, title: event.target.value }))} placeholder="Event title" /><Input value={eventForm.category} onChange={(event) => setEventForm((form) => ({ ...form, category: event.target.value }))} placeholder="Category" /><Input type="datetime-local" value={eventForm.startsAt} onChange={(event) => setEventForm((form) => ({ ...form, startsAt: event.target.value }))} /><Input type="datetime-local" value={eventForm.endsAt} onChange={(event) => setEventForm((form) => ({ ...form, endsAt: event.target.value }))} />{hotelOrganizations.length > 0 && <div><label className="mb-2 block text-sm font-medium">Hotel ownership</label><Select value={eventForm.organizationId} onValueChange={(organizationId) => setEventForm((form) => ({ ...form, organizationId }))}><SelectTrigger><SelectValue placeholder="Choose the hotel" /></SelectTrigger><SelectContent>{hotelOrganizations.map((organization) => <SelectItem key={organization.id} value={organization.id}>{organization.name}</SelectItem>)}</SelectContent></Select></div>}<div><label className="mb-2 block text-sm font-medium">Hotel facility</label><Select value={eventForm.facilityId} onValueChange={(facilityId) => setEventForm((form) => ({ ...form, facilityId }))}><SelectTrigger><SelectValue placeholder="Choose a venue facility" /></SelectTrigger><SelectContent>{facilities.map((facility) => <SelectItem key={facility.id} value={facility.id}>{facility.name}</SelectItem>)}</SelectContent></Select></div><Input value={eventForm.hostName} onChange={(event) => setEventForm((form) => ({ ...form, hostName: event.target.value }))} placeholder="Host name" /><div className="md:col-span-2 space-y-2"><label className="block text-sm font-medium text-gray-700">Event image (optional)</label><Input type="file" accept="image/*" disabled={isUploading} onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) void uploadEventImage(file); event.currentTarget.value = ""; }} />{isUploading && <p className="text-sm text-gray-500">Uploading to secure storage…</p>}{eventForm.imageUrl && <img src={eventForm.imageUrl} alt="Event preview" className="h-32 w-full rounded-lg object-cover" />}</div><Input type="number" min="0" step="0.01" value={eventForm.price} onChange={(event) => setEventForm((form) => ({ ...form, price: event.target.value }))} placeholder="General admission price" /><Input value={eventForm.currency} onChange={(event) => setEventForm((form) => ({ ...form, currency: event.target.value }))} placeholder="Currency, e.g. UGX" /><Input type="number" min="1" value={eventForm.capacity} onChange={(event) => setEventForm((form) => ({ ...form, capacity: event.target.value }))} placeholder="Capacity / ticket limit" /><Input type="number" min="1" max="50" value={eventForm.maxTicketsPerOrder} onChange={(event) => setEventForm((form) => ({ ...form, maxTicketsPerOrder: event.target.value }))} placeholder="Max tickets per order" /><Input value={eventForm.timezone} onChange={(event) => setEventForm((form) => ({ ...form, timezone: event.target.value }))} placeholder="Timezone, e.g. Africa/Kampala" /><Textarea className="md:col-span-2" value={eventForm.description} onChange={(event) => setEventForm((form) => ({ ...form, description: event.target.value }))} placeholder="Event description" /></div><label className="mt-4 block text-sm">Event poster (public B2 image)<Input type="file" accept="image/*" disabled={isUploading} onChange={async (change) => { const file = change.target.files?.[0]; if (!file) return; if (!file.type.startsWith("image/")) { setNotice("Choose an image file for the event poster."); return; } const uploaded = await uploadFile(file, "special-events/posters"); if (uploaded) setEventForm((form) => ({ ...form, imageUrl: uploaded.publicUrl })); else setNotice("We could not upload the event poster."); }} />{eventForm.imageUrl && <img src={eventForm.imageUrl} alt="Event poster preview" className="mt-2 h-28 rounded object-cover" />}</label><div className="mt-4 flex items-center justify-between"><span className="text-sm font-medium">Featured event</span><Switch checked={eventForm.featured} onCheckedChange={(checked) => setEventForm((form) => ({ ...form, featured: checked }))} /></div><div className="mt-4 flex gap-2"><Button disabled={isSavingPlan} onClick={() => void saveManagedEvent()} className="bg-sheraton-gold hover:bg-sheraton-gold/90 text-sheraton-navy">{isSavingPlan ? "Saving..." : editingEventId ? "Update Published Event" : "Publish Event"}</Button>{events.length > 0 && <span className="text-xs text-gray-500 self-center">Use the event cards below to view published records.</span>}</div><div className="mt-5 space-y-2">{events.map((event) => <div key={event.id} className="flex items-center justify-between rounded border p-3"><span className="text-sm font-medium text-sheraton-navy">{event.title}</span><span className="flex gap-2"><Button size="sm" variant="outline" onClick={() => editManagedEvent(event)}>Edit</Button><Button size="sm" variant="outline" onClick={() => void deleteManagedEvent(event.id)}>Cancel</Button></span></div>)}</div></div>}
+      {canManageEvents && <div className="bg-white rounded-lg shadow-md p-6"><div className="flex items-center justify-between mb-4"><div><h4 className="text-lg font-semibold text-sheraton-navy">Create a Hotel Event</h4><p className="text-sm text-gray-600">This price applies only to hotel-organized events; creators set fees for their own events.</p></div>{editingEventId && <Button variant="outline" onClick={() => { setEditingEventId(null); setEventForm(initialEventForm); }}>Cancel edit</Button>}</div><div className="grid md:grid-cols-2 gap-4"><Input value={eventForm.title} onChange={(event) => setEventForm((form) => ({ ...form, title: event.target.value }))} placeholder="Event title" /><Input value={eventForm.category} onChange={(event) => setEventForm((form) => ({ ...form, category: event.target.value }))} placeholder="Category" /><Input type="datetime-local" value={eventForm.startsAt} onChange={(event) => setEventForm((form) => ({ ...form, startsAt: event.target.value }))} /><Input type="datetime-local" value={eventForm.endsAt} onChange={(event) => setEventForm((form) => ({ ...form, endsAt: event.target.value }))} />{tenant && <div className="flex items-center rounded-md border px-3 text-sm text-muted-foreground">Hotel: {tenant.name}</div>}<div><label className="mb-2 block text-sm font-medium">Hotel facility</label><Select value={eventForm.facilityId} onValueChange={(facilityId) => setEventForm((form) => ({ ...form, facilityId }))}><SelectTrigger><SelectValue placeholder="Choose a venue facility" /></SelectTrigger><SelectContent>{facilities.map((facility) => <SelectItem key={facility.id} value={facility.id}>{facility.name}</SelectItem>)}</SelectContent></Select></div><Input value={eventForm.hostName} onChange={(event) => setEventForm((form) => ({ ...form, hostName: event.target.value }))} placeholder="Host name" /><div className="md:col-span-2 space-y-2"><label className="block text-sm font-medium text-gray-700">Event image (optional)</label><Input type="file" accept="image/*" disabled={isUploading} onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) void uploadEventImage(file); event.currentTarget.value = ""; }} />{isUploading && <p className="text-sm text-gray-500">Uploading to secure storage…</p>}{eventForm.imageUrl && <img src={eventForm.imageUrl} alt="Event preview" className="h-32 w-full rounded-lg object-cover" />}</div><Input type="number" min="0" step="0.01" value={eventForm.price} onChange={(event) => setEventForm((form) => ({ ...form, price: event.target.value }))} placeholder="General admission price" /><Input value={eventForm.currency} onChange={(event) => setEventForm((form) => ({ ...form, currency: event.target.value }))} placeholder="Currency, e.g. UGX" /><Input type="number" min="1" value={eventForm.capacity} onChange={(event) => setEventForm((form) => ({ ...form, capacity: event.target.value }))} placeholder="Capacity / ticket limit" /><Input type="number" min="1" max="50" value={eventForm.maxTicketsPerOrder} onChange={(event) => setEventForm((form) => ({ ...form, maxTicketsPerOrder: event.target.value }))} placeholder="Max tickets per order" /><Input value={eventForm.timezone} onChange={(event) => setEventForm((form) => ({ ...form, timezone: event.target.value }))} placeholder="Timezone, e.g. Africa/Kampala" /><Textarea className="md:col-span-2" value={eventForm.description} onChange={(event) => setEventForm((form) => ({ ...form, description: event.target.value }))} placeholder="Event description" /></div><label className="mt-4 block text-sm">Event poster (public B2 image)<Input type="file" accept="image/*" disabled={isUploading} onChange={async (change) => { const file = change.target.files?.[0]; if (!file) return; if (!file.type.startsWith("image/")) { setNotice("Choose an image file for the event poster."); return; } const uploaded = await uploadFile(file, "special-events/posters"); if (uploaded) setEventForm((form) => ({ ...form, imageUrl: uploaded.publicUrl })); else setNotice("We could not upload the event poster."); }} />{eventForm.imageUrl && <img src={eventForm.imageUrl} alt="Event poster preview" className="mt-2 h-28 rounded object-cover" />}</label><div className="mt-4 flex items-center justify-between"><span className="text-sm font-medium">Featured event</span><Switch checked={eventForm.featured} onCheckedChange={(checked) => setEventForm((form) => ({ ...form, featured: checked }))} /></div><div className="mt-4 flex gap-2"><Button disabled={isSavingPlan} onClick={() => void saveManagedEvent()} className="bg-sheraton-gold hover:bg-sheraton-gold/90 text-sheraton-navy">{isSavingPlan ? "Saving..." : editingEventId ? "Update Published Event" : "Publish Event"}</Button>{events.length > 0 && <span className="text-xs text-gray-500 self-center">Use the event cards below to view published records.</span>}</div><div className="mt-5 space-y-2">{events.map((event) => <div key={event.id} className="flex items-center justify-between rounded border p-3"><span className="text-sm font-medium text-sheraton-navy">{event.title}</span><span className="flex gap-2"><Button size="sm" variant="outline" onClick={() => editManagedEvent(event)}>Edit</Button><Button size="sm" variant="outline" onClick={() => void deleteManagedEvent(event.id)}>Cancel</Button></span></div>)}</div></div>}
     </div>
   );
 

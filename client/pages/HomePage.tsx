@@ -9,6 +9,7 @@ import {
 } from "../components/ui/card";
 import { Badge } from "../components/ui/badge";
 import GuestComplaintForm from "../components/GuestComplaintForm";
+import { useHotelTenant } from "../lib/hotelTenant";
 import {
   Crown,
   Hotel,
@@ -36,6 +37,8 @@ interface HomePageProps {
 }
 
 const HomePage = ({ displayName = "Special Guest" }: HomePageProps) => {
+  const { tenant } = useHotelTenant();
+  const hotelName = tenant?.name || "your hotel";
   const [timeOfDay, setTimeOfDay] = useState("");
   const [currentOffer, setCurrentOffer] = useState(0);
 
@@ -171,7 +174,7 @@ const HomePage = ({ displayName = "Special Guest" }: HomePageProps) => {
             </h1>
 
             <p className="text-xl md:text-2xl mb-8 text-white/90 leading-relaxed">
-              Welcome to Sheraton Special - where technology meets hospitality
+              Welcome to {hotelName} - where technology meets hospitality
               to create extraordinary moments that make you feel truly special,
               every single time.
             </p>
@@ -354,7 +357,7 @@ const HomePage = ({ displayName = "Special Guest" }: HomePageProps) => {
           <div className="max-w-6xl mx-auto">
             <div className="text-center mb-12">
               <h2 className="text-3xl md:text-4xl font-bold text-sheraton-navy mb-4">
-                Why Sheraton Special?
+                Why {hotelName}?
               </h2>
               <p className="text-lg text-muted-foreground">
                 Experience the perfect blend of luxury, technology, and
