@@ -48,6 +48,7 @@ import {
 } from "../../lib/flutterwave";
 import { supabase } from "../../lib/supabase";
 import { syncActiveMenuCart } from "../../lib/menuCart";
+import { useHotelTenant } from "../../lib/hotelTenant";
 
 interface MenuItem {
   id: string;
@@ -77,6 +78,7 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
   resumableOrder,
   durableCartId,
 }) => {
+  const { tenant } = useHotelTenant();
   const [step, setStep] = useState<
     "cart" | "details" | "payment" | "confirmation"
   >("cart");
@@ -250,7 +252,9 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
       throw new Error(("error" in paymentSession && paymentSession.error) || "Unable to prepare secure checkout.");
     }
 
+    if (!tenant) throw new Error("This hotel domain is not configured");
     savePendingCheckout({
+      organizationId: tenant.organizationId,
       orderId: id,
       orderNumber,
       cart,
@@ -294,13 +298,14 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
       if (!currency) throw new Error("Please checkout items in the same currency.");
       const items = requestedItems;
       const customer = customerSnapshot;
+      if (!tenant) throw new Error("This hotel domain is not configured");
       let orderCartId = durableCartId || null;
       if (orderCartId) {
         orderCartId = await syncActiveMenuCart(orderCartId, items.map(({ menuItemId, quantity }) => {
           const item = menuItems.find((candidate) => candidate.id === menuItemId);
           if (!item) throw new Error("A selected menu item is no longer available.");
           return { menuItemId, quantity, unitPrice: item.price };
-        }));
+        }), tenant.organizationId);
       }
       const fingerprint = currentFingerprint;
       if (checkoutFingerprintRef.current !== fingerprint) {

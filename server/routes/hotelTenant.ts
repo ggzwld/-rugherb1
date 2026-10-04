@@ -85,8 +85,178 @@ const callTenantRpc = async <T>(name: string, args: Record<string, unknown>): Pr
     body: JSON.stringify(args),
     signal: AbortSignal.timeout(10_000),
   });
-  if (!response.ok) throw new Error("Hotel information could not be loaded");
-  return response.json() as Promise<T>;
+  const payload = await response.json().catch(() => null) as T | { message?: string } | null;
+  if (!response.ok) {
+    throw new Error(payload && typeof payload === "object" && "message" in payload && typeof payload.message === "string"
+      ? payload.message
+      : "Hotel information could not be loaded");
+  }
+  return payload as T;
+};
+
+const getAuthenticatedUserId = async (authorization: string | undefined) => {
+  if (!authorization?.startsWith("Bearer ")) throw new Error("Authentication is required");
+  const { supabaseUrl, supabaseAnonKey } = configuration();
+  const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
+    headers: { apikey: supabaseAnonKey, Authorization: authorization },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new Error("Your sign-in session has expired");
+  const user = await response.json() as { id?: string };
+  if (!user.id) throw new Error("Your sign-in session could not be verified");
+  return user.id;
+};
+
+const isUuid = (value: unknown): value is string => typeof value === "string"
+  && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+
+export const submitHotelEventProposal: RequestHandler = async (request, response) => {
+  try {
+    const tenant = await resolveRequestHotelTenant(request);
+    const userId = await getAuthenticatedUserId(request.headers.authorization);
+    const input = request.body as Record<string, unknown>;
+    const planId = input.target_plan_id;
+    if (planId !== null && planId !== undefined && !isUuid(planId)) {
+      response.status(400).json({ error: "Event proposal is invalid" });
+      return;
+    }
+    const result = await callTenantRpc<string>("submit_special_event_proposal_for_tenant", {
+      target_organization_id: tenant.organizationId,
+      target_user_id: userId,
+      target_plan_id: planId ?? null,
+      proposal_title: input.proposal_title,
+      proposal_description: input.proposal_description ?? null,
+      proposal_category: input.proposal_category,
+      proposal_starts_at: input.proposal_starts_at,
+      proposal_ends_at: input.proposal_ends_at,
+      proposal_timezone: input.proposal_timezone,
+      proposal_facility_id: input.proposal_facility_id,
+      proposal_expected_guests: input.proposal_expected_guests,
+      proposal_contact_name: input.proposal_contact_name,
+      proposal_contact_email: input.proposal_contact_email,
+      proposal_contact_phone: input.proposal_contact_phone ?? null,
+      proposal_image_url: input.proposal_image_url ?? null,
+      proposal_is_private: input.proposal_is_private,
+      proposal_entry_type: input.proposal_entry_type,
+      proposal_entry_fee: input.proposal_entry_fee,
+      proposal_share_manager_operations: input.proposal_share_manager_operations ?? false,
+    });
+    response.json({ planId: result });
+  } catch (error) {
+    response.status(400).json({ error: error instanceof Error ? error.message : "Unable to submit event proposal" });
+  }
+};
+
+export const reviewHotelEventProposal: RequestHandler = async (request, response) => {
+  try {
+    const tenant = await resolveRequestHotelTenant(request);
+    const userId = await getAuthenticatedUserId(request.headers.authorization);
+    const input = request.body as { planId?: unknown; action?: unknown; suggestedValues?: unknown; reviewMessage?: unknown };
+    if (!isUuid(input.planId) || !["approve", "decline", "suggest_changes"].includes(String(input.action))) {
+      response.status(400).json({ error: "Event review details are invalid" });
+      return;
+    }
+    await callTenantRpc("review_special_event_proposal_for_tenant", {
+      target_organization_id: tenant.organizationId,
+      target_user_id: userId,
+      target_plan_id: input.planId,
+      review_action: input.action,
+      suggested_values: input.suggestedValues ?? null,
+      review_message: input.reviewMessage ?? null,
+    });
+    response.json({ success: true });
+  } catch (error) {
+    response.status(400).json({ error: error instanceof Error ? error.message : "Unable to review event proposal" });
+  }
+};
+
+export const respondHotelEventProposal: RequestHandler = async (request, response) => {
+  try {
+    const tenant = await resolveRequestHotelTenant(request);
+    const userId = await getAuthenticatedUserId(request.headers.authorization);
+    const { planId, acceptSuggestions } = request.body as { planId?: unknown; acceptSuggestions?: unknown };
+    if (!isUuid(planId) || typeof acceptSuggestions !== "boolean") {
+      response.status(400).json({ error: "Event response details are invalid" });
+      return;
+    }
+    await callTenantRpc("respond_to_special_event_proposal_for_tenant", {
+      target_organization_id: tenant.organizationId,
+      target_user_id: userId,
+      target_plan_id: planId,
+      accept_suggestions: acceptSuggestions,
+    });
+    response.json({ success: true });
+  } catch (error) {
+    response.status(400).json({ error: error instanceof Error ? error.message : "Unable to respond to event proposal" });
+  }
+};
+
+export const publishHotelEventProposal: RequestHandler = async (request, response) => {
+  try {
+    const tenant = await resolveRequestHotelTenant(request);
+    const userId = await getAuthenticatedUserId(request.headers.authorization);
+    const { planId } = request.body as { planId?: unknown };
+    if (!isUuid(planId)) {
+      response.status(400).json({ error: "Event proposal is invalid" });
+      return;
+    }
+    await callTenantRpc("publish_special_event_proposal_for_tenant", {
+      target_organization_id: tenant.organizationId,
+      target_user_id: userId,
+      target_plan_id: planId,
+    });
+    response.json({ success: true });
+  } catch (error) {
+    response.status(400).json({ error: error instanceof Error ? error.message : "Unable to publish event proposal" });
+  }
+};
+
+export const submitHotelComplaint: RequestHandler = async (request, response) => {
+  try {
+    const tenant = await resolveRequestHotelTenant(request);
+    const input = request.body as Record<string, unknown>;
+    const requiredText = (value: unknown, maximumLength: number) => typeof value === "string"
+      && value.trim().length > 0 && value.trim().length <= maximumLength;
+    if (!requiredText(input.guestName, 160) || !requiredText(input.email, 320)
+      || !requiredText(input.roomNumber, 64) || !requiredText(input.complaintType, 120)
+      || !requiredText(input.description, 5000)
+      || !["low", "medium", "high", "urgent"].includes(String(input.priority))) {
+      response.status(400).json({ error: "Complete the required complaint details" });
+      return;
+    }
+    const userId = request.headers.authorization
+      ? await getAuthenticatedUserId(request.headers.authorization)
+      : null;
+    const { supabaseUrl, supabaseAnonKey, serviceRoleKey } = configuration();
+    const insertResponse = await fetch(`${supabaseUrl}/rest/v1/complaints?select=id`, {
+      method: "POST",
+      headers: {
+        apikey: supabaseAnonKey,
+        Authorization: `Bearer ${serviceRoleKey}`,
+        "content-type": "application/json",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({
+        user_id: userId,
+        organization_id: tenant.organizationId,
+        guest_name: String(input.guestName).trim(),
+        email: String(input.email).trim().toLowerCase(),
+        room_number: String(input.roomNumber).trim(),
+        complaint_type: String(input.complaintType).trim(),
+        description: String(input.description).trim(),
+        priority: input.priority,
+        status: "open",
+        attachments: [],
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const rows = await insertResponse.json().catch(() => null) as Array<{ id: string }> | null;
+    if (!insertResponse.ok || !rows?.[0]?.id) throw new Error("Complaint could not be submitted");
+    setPrivateTenantResponse(response);
+    response.status(201).json({ complaintId: rows[0].id });
+  } catch (error) {
+    response.status(400).json({ error: error instanceof Error ? error.message : "Complaint could not be submitted" });
+  }
 };
 
 export const getHotelTenant: RequestHandler = async (request, response) => {

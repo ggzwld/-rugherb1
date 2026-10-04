@@ -5,6 +5,7 @@ export interface FlutterwaveHostedSession {
 }
 
 export interface PendingCheckoutContext {
+  organizationId: string;
   orderId: string;
   orderNumber: string;
   cart: Record<string, number>;
@@ -39,6 +40,7 @@ export const getPendingCheckout = (): PendingCheckoutContext | null => {
   try {
     const context = JSON.parse(storedContext) as Partial<PendingCheckoutContext>;
     if (
+      typeof context.organizationId !== "string" ||
       typeof context.orderId !== "string" ||
       typeof context.orderNumber !== "string" ||
       !context.cart ||

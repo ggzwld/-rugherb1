@@ -55,9 +55,6 @@ interface TaskCreationFormProps {
   selectedComplaint: any;
   internalStaff: Assignee[];
   externalVendors: Assignee[];
-  hotelOrganizations: Array<{ id: string; name: string }>;
-  selectedOrganizationId: string;
-  onOrganizationChange: (organizationId: string) => void;
   isSubmitting: boolean;
   onFormChange: (field: string, value: string | string[]) => void;
   onAddAttachments: (attachments: FileAttachment[]) => void;
@@ -71,9 +68,6 @@ const TaskCreationForm: React.FC<TaskCreationFormProps> = ({
   selectedComplaint,
   internalStaff,
   externalVendors,
-  hotelOrganizations,
-  selectedOrganizationId,
-  onOrganizationChange,
   isSubmitting,
   onFormChange,
   onAddAttachments,
@@ -131,19 +125,6 @@ const TaskCreationForm: React.FC<TaskCreationFormProps> = ({
               />
             </div>
 
-            {hotelOrganizations.length > 0 && (
-              <div className="space-y-2">
-                <Label>Hotel ownership</Label>
-                <Select value={selectedOrganizationId} onValueChange={onOrganizationChange}>
-                  <SelectTrigger><SelectValue placeholder="Choose the hotel responsible for this task" /></SelectTrigger>
-                  <SelectContent>
-                    {hotelOrganizations.map((organization) => (
-                      <SelectItem key={organization.id} value={organization.id}>{organization.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
             <div className="space-y-2">
               <Label htmlFor="task-desc">Description</Label>
               <Textarea

@@ -40,15 +40,12 @@ interface NewTaskTabProps {
   isSubmitting: boolean;
   internalStaff: Assignee[];
   externalVendors: Assignee[];
-  hotelOrganizations: Array<{ id: string; name: string }>;
-  selectedOrganizationId: string;
   onSelectComplaint: (complaint: Complaint) => void;
   onAcceptComplaint: (complaint: Complaint) => void;
   onFormChange: (field: string, value: string | string[]) => void;
   onAddAttachments: (attachments: FileAttachment[]) => void;
   onRemoveAttachment: (id: string) => void;
   onCreateTask: () => void;
-  onOrganizationChange: (organizationId: string) => void;
   onClearSelectedComplaint: () => void;
 }
 
@@ -62,15 +59,12 @@ const NewTaskTab: React.FC<NewTaskTabProps> = ({
   isSubmitting,
   internalStaff,
   externalVendors,
-  hotelOrganizations,
-  selectedOrganizationId,
   onSelectComplaint,
   onAcceptComplaint,
   onFormChange,
   onAddAttachments,
   onRemoveAttachment,
   onCreateTask,
-  onOrganizationChange,
   onClearSelectedComplaint,
 }) => {
   return (
@@ -128,9 +122,6 @@ const NewTaskTab: React.FC<NewTaskTabProps> = ({
             selectedComplaint={selectedComplaint}
             internalStaff={internalStaff}
             externalVendors={externalVendors}
-            hotelOrganizations={hotelOrganizations}
-            selectedOrganizationId={selectedOrganizationId}
-            onOrganizationChange={onOrganizationChange}
             isSubmitting={isSubmitting}
             onFormChange={onFormChange}
             onAddAttachments={onAddAttachments}
