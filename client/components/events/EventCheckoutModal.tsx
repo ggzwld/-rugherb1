@@ -155,22 +155,31 @@ const EventCheckoutModal: React.FC<Props> = ({ isOpen, onClose, cart, events, on
         idempotencyFingerprint.current = fingerprint;
         idempotencyKey.current = crypto.randomUUID();
       }
-      const { data: bookingResult, error: bookingError } = await supabase.rpc("create_special_event_booking", {
-        target_event_id: selectedEvent.id,
-        target_quantity: selectedEvent.quantity,
-        guest_first_name: guestInfo.firstName.trim(),
-        guest_last_name: guestInfo.lastName.trim(),
-        guest_email: guestInfo.email.trim(),
-        guest_phone: guestInfo.phone.trim() || null,
-        special_requests: [guestInfo.company, guestInfo.dietaryRestrictions, guestInfo.specialRequests].filter(Boolean).join(" | ") || null,
-        target_ticket_type_id: selectedEvent.default_ticket_type_id,
-        target_idempotency_key: idempotencyKey.current,
-        target_attendee_names: attendeeNames.slice(0, selectedEvent.quantity).map((name) => name.trim()),
-        target_invitation_id: invitationId,
-        target_share_token: selectedEvent.share_token || null,
+      const { data: sessionData } = await supabase.auth.getSession();
+      if (!sessionData.session?.access_token) throw new Error("Please sign in before booking this event.");
+      const bookingResponse = await fetch("/api/special-events/bookings/create", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${sessionData.session.access_token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          eventId: selectedEvent.id,
+          quantity: selectedEvent.quantity,
+          firstName: guestInfo.firstName.trim(),
+          lastName: guestInfo.lastName.trim(),
+          email: guestInfo.email.trim(),
+          phone: guestInfo.phone.trim() || null,
+          specialRequests: [guestInfo.company, guestInfo.dietaryRestrictions, guestInfo.specialRequests].filter(Boolean).join(" | ") || null,
+          ticketTypeId: selectedEvent.default_ticket_type_id,
+          idempotencyKey: idempotencyKey.current,
+          attendeeNames: attendeeNames.slice(0, selectedEvent.quantity).map((name) => name.trim()),
+          invitationId,
+          shareToken: selectedEvent.share_token || null,
+        }),
       });
-      if (bookingError || !bookingResult?.[0]) throw bookingError || new Error("Unable to create event booking.");
-      const booking = bookingResult[0] as { booking_id: string; total_amount: number | string; currency: string };
+      const bookingPayload = await bookingResponse.json().catch(() => null) as { booking_id?: string; total_amount?: number | string; currency?: string; error?: string } | null;
+      if (!bookingResponse.ok || !bookingPayload?.booking_id || bookingPayload.total_amount === undefined || !bookingPayload.currency) {
+        throw new Error(bookingPayload?.error || "Unable to create event booking.");
+      }
+      const booking = bookingPayload as { booking_id: string; total_amount: number | string; currency: string };
       const authoritativeTotal = Number(booking.total_amount);
       const currencyDigits = new Intl.NumberFormat(undefined, { style: "currency", currency: booking.currency }).resolvedOptions().maximumFractionDigits;
       const normalizedPreview = Number(subtotal.toFixed(currencyDigits));
@@ -184,9 +193,17 @@ const EventCheckoutModal: React.FC<Props> = ({ isOpen, onClose, cart, events, on
         setServerQuote({ amount: authoritativeTotal, currency: booking.currency, fingerprint });
       }
       if (authoritativeTotal === 0) {
-        const { data: freeResult, error: freeError } = await supabase.rpc("confirm_free_special_event_booking", { target_booking_id: booking.booking_id });
-        if (freeError || !freeResult?.[0]) throw freeError || new Error("Unable to confirm free event booking.");
-        setConfirmation({ confirmationNumber: freeResult[0].confirmation_number, ticketCode: freeResult[0].ticket_code, eventTitle: selectedEvent.title, quantity: selectedEvent.quantity, total: authoritativeTotal, currency: booking.currency });
+        const { data: sessionData } = await supabase.auth.getSession();
+        const confirmationResponse = await fetch("/api/special-events/bookings/confirm-free", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${sessionData.session?.access_token || ""}`, "content-type": "application/json" },
+          body: JSON.stringify({ bookingId: booking.booking_id }),
+        });
+        const confirmationPayload = await confirmationResponse.json().catch(() => null) as { confirmation_number?: string; ticket_code?: string; error?: string } | null;
+        if (!confirmationResponse.ok || !confirmationPayload?.confirmation_number || !confirmationPayload.ticket_code) {
+          throw new Error(confirmationPayload?.error || "Unable to confirm free event booking.");
+        }
+        setConfirmation({ confirmationNumber: confirmationPayload.confirmation_number, ticketCode: confirmationPayload.ticket_code, eventTitle: selectedEvent.title, quantity: selectedEvent.quantity, total: authoritativeTotal, currency: booking.currency });
         setStep("confirmation");
         onClearCart();
         onBooked();

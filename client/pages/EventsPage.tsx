@@ -27,6 +27,7 @@ import EventCheckoutModal from "../components/events/EventCheckoutModal";
 import TicketQr from "../components/events/TicketQr";
 import { useFileUpload } from "../hooks/useFileUpload";
 import { supabase } from "../lib/supabase";
+import { useHotelTenant } from "../lib/hotelTenant";
 import {
   formatEventDate,
   formatEventDay,
@@ -168,6 +169,7 @@ const dateTimeInputInEventZone = (instant: string, timezone: string) => {
 };
 
 const EventsPage: React.FC = () => {
+  const { tenant, loading: tenantLoading } = useHotelTenant();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const invitationToken = searchParams.get("invite");
@@ -192,7 +194,7 @@ const EventsPage: React.FC = () => {
   const [proposalQueue, setProposalQueue] = useState<SpecialEventPlan[]>([]);
   const [scheduledProposals, setScheduledProposals] = useState<SpecialEventPlan[]>([]);
   const [facilities, setFacilities] = useState<Array<{ id: string; name: string }>>([]);
-  const [hotelOrganizations, setHotelOrganizations] = useState<Array<{ id: string; name: string }>>([]);
+  const [canManageEvents, setCanManageEvents] = useState(false);
   const [proposalReviewForms, setProposalReviewForms] = useState<Record<string, ProposalReviewForm>>({});
   const [proposalReviewNotes, setProposalReviewNotes] = useState<Record<string, string>>({});
   const [inviteEmails, setInviteEmails] = useState<Record<string, string>>({});
@@ -221,6 +223,7 @@ const EventsPage: React.FC = () => {
   const pendingPlanScrollId = useRef<string | null>(null);
 
   const loadUserData = async (userId: string | null) => {
+    if (!tenant) return;
     if (!userId) {
       setIsSignedIn(false);
       setCurrentUserId(null);
@@ -236,7 +239,7 @@ const EventsPage: React.FC = () => {
       setProposalQueue([]);
       setScheduledProposals([]);
       setFacilities([]);
-      setHotelOrganizations([]);
+      setCanManageEvents(false);
       setProfileRole(null);
       return;
     }
@@ -246,7 +249,7 @@ const EventsPage: React.FC = () => {
     const [profileResult, favoritesResult, bookingsResult, plansResult, staffResult, facilitiesResult, proposalQueueResult, invitationsResult, incomingInvitationsResult] = await Promise.all([
       supabase.from("user_profiles").select("role,first_name,last_name,email,phone").eq("user_id", userId).maybeSingle(),
       supabase.from("special_event_favorites").select("event_id").eq("user_id", userId),
-      supabase.from("special_event_bookings").select("*").eq("user_id", userId).order("created_at", { ascending: false }),
+      supabase.from("special_event_bookings").select("*").eq("user_id", userId).eq("organization_id", tenant.organizationId).order("created_at", { ascending: false }),
       supabase.from("special_event_plans").select("*").eq("user_id", userId).order("event_date", { ascending: true }),
       supabase.from("special_event_staff").select("event_id").eq("user_id", userId).eq("status", "active"),
       supabase.from("special_event_facilities").select("id,name").eq("is_active", true).order("display_order"),
@@ -277,22 +280,15 @@ const EventsPage: React.FC = () => {
     const role = profileResult.data?.role || null;
     setProfileRole(role);
     setFacilities((facilitiesResult.data || []) as Array<{ id: string; name: string }>);
-    if (role === "manager" || role === "admin") {
-      const { data: memberships } = await supabase.from("books_memberships").select("organization_id")
-        .eq("user_id", userId).in("role", ["owner", "admin", "manager"]);
-      const organizationIds = [...new Set((memberships || []).map((membership) => membership.organization_id))];
-      const { data: organizations } = organizationIds.length
-        ? await supabase.from("books_organizations").select("id,name").in("id", organizationIds).order("name")
-        : { data: [] };
-      const choices = (organizations || []).map((organization) => ({ id: organization.id, name: organization.name }));
-      setHotelOrganizations(choices);
-      if (choices.length === 1) setEventForm((form) => form.organizationId ? form : { ...form, organizationId: choices[0].id });
-    } else {
-      setHotelOrganizations([]);
-    }
+    const { data: membership } = role === "manager" || role === "admin"
+      ? await supabase.from("books_memberships").select("organization_id")
+        .eq("user_id", userId).eq("organization_id", tenant.organizationId).in("role", ["owner", "admin"]).maybeSingle()
+      : { data: null };
+    const canManageTenantEvents = Boolean(tenant && membership);
+    setCanManageEvents(canManageTenantEvents);
     const reviewRows = (proposalQueueResult.data || []) as SpecialEventPlan[];
-    setProposalQueue(role === "manager" || role === "admin" ? reviewRows.filter((plan) => plan.status === "submitted") : []);
-    setScheduledProposals(role === "manager" || role === "admin" ? reviewRows.filter((plan) => plan.status === "scheduled") : []);
+    setProposalQueue(canManageTenantEvents ? reviewRows.filter((plan) => plan.status === "submitted") : []);
+    setScheduledProposals(canManageTenantEvents ? reviewRows.filter((plan) => plan.status === "scheduled") : []);
     setPlanForm((form) => ({
       ...form,
       contactName: form.contactName || [profileResult.data?.first_name, profileResult.data?.last_name].filter(Boolean).join(" "),
@@ -315,20 +311,15 @@ const EventsPage: React.FC = () => {
     setIsLoading(true);
     setErrorMessage("");
     try {
-      const [{ data: eventRows, error: eventsError }, { data: authData }] = await Promise.all([
-        supabase
-          .from("special_events")
-          .select("*")
-          .eq("status", "published")
-          .eq("is_private", false)
-          .gte("starts_at", new Date().toISOString())
-          .order("featured", { ascending: false })
-          .order("starts_at", { ascending: true }),
+      if (!tenant) throw new Error("This hotel domain is not configured.");
+      const [eventsResponse, { data: authData }] = await Promise.all([
+        fetch("/api/hotel-events", { cache: "no-store" }),
         supabase.auth.getUser(),
       ]);
-      if (eventsError) throw eventsError;
+      const eventPayload = await eventsResponse.json().catch(() => null) as { events?: SpecialEvent[]; error?: string } | null;
+      if (!eventsResponse.ok || !eventPayload?.events) throw new Error(eventPayload?.error || "Events are not available right now.");
       await loadUserData(authData.user?.id || null);
-      setEvents((eventRows || []) as SpecialEvent[]);
+      setEvents(eventPayload.events);
     } catch (error) {
       console.error("Unable to load special events", error);
       setErrorMessage("Events are not available right now. Please try again shortly.");
@@ -392,6 +383,7 @@ const EventsPage: React.FC = () => {
   }, [activeTab, plans]);
 
   useEffect(() => {
+    if (tenantLoading) return;
     void loadEvents();
     const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
       void loadUserData(session?.user?.id || null).catch((error) => {
@@ -410,7 +402,7 @@ const EventsPage: React.FC = () => {
       authListener.subscription.unsubscribe();
       void proposalChannel.unsubscribe();
     };
-  }, []);
+  }, [tenantLoading, tenant?.organizationId]);
 
   const eventCategories = useMemo(() => {
     const categories = events.map((event) => event.category).filter((category): category is string => Boolean(category));
@@ -432,7 +424,6 @@ const EventsPage: React.FC = () => {
   const getEvent = (eventId: string) => [...events, ...linkedEvents, ...bookedEvents, ...(sharedEvent ? [sharedEvent] : [])].find((event) => event.id === eventId);
   const getTotalEventItems = () => Object.values(eventCart).reduce((total, count) => total + count, 0);
 
-  const canManageEvents = profileRole === "manager" || profileRole === "admin";
 
   const requireAuth = () => {
     if (isSignedIn) return true;

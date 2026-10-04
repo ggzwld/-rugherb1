@@ -181,15 +181,16 @@ const MenuPage = () => {
   ];
 
   useEffect(() => {
-    supabase
-      .from("menu_items")
-      .select("*")
-      .eq("is_published", true)
-      .order("created_at", { ascending: true })
-      .then(({ data }) => {
-        if (data) setMenuItems(data.map(menuItemFromDatabaseRow));
+    let active = true;
+    fetch("/api/hotel-menu-items", { cache: "no-store" })
+      .then(async (response) => {
+        const payload = await response.json().catch(() => null) as { items?: Record<string, unknown>[]; error?: string } | null;
+        if (!response.ok) throw new Error(payload?.error || "Menu information could not be loaded.");
+        if (active && payload?.items) setMenuItems(payload.items.map(menuItemFromDatabaseRow));
       })
-      .finally(() => setMenuItemsReady(true));
+      .catch((error) => console.error("Unable to load tenant menu items", error))
+      .finally(() => { if (active) setMenuItemsReady(true); });
+    return () => { active = false; };
   }, []);
 
   const filteredItems = menuItems.filter((item) => {

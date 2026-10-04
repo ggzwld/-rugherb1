@@ -1,4 +1,5 @@
 import type { RequestHandler } from "express";
+import { resolveRequestHotelTenant } from "./hotelTenant.js";
 
 type MenuOrderInput = {
   items?: Array<{ menuItemId?: string; quantity?: number }>;
@@ -50,8 +51,9 @@ export const createMenuOrder: RequestHandler = async (request, response) => {
       return response.status(400).json({ error: "Tip amount is invalid." });
     }
 
+    const tenant = await resolveRequestHotelTenant(request);
     const { supabaseUrl, supabaseAnonKey, serviceRoleKey } = getConfiguration();
-    const rpcResponse = await fetch(`${supabaseUrl}/rest/v1/rpc/create_menu_order`, {
+    const rpcResponse = await fetch(`${supabaseUrl}/rest/v1/rpc/create_menu_order_for_tenant`, {
       method: "POST",
       headers: {
         apikey: supabaseAnonKey,
@@ -60,6 +62,7 @@ export const createMenuOrder: RequestHandler = async (request, response) => {
         Prefer: "return=representation",
       },
       body: JSON.stringify({
+        target_organization_id: tenant.organizationId,
         target_user_id: userId,
         target_items: input.items.map(({ menuItemId, quantity }) => ({ menuItemId, quantity })),
         target_order_type: input.orderType,

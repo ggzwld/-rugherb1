@@ -1,5 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import type { RequestHandler } from "express";
+import type { Request, RequestHandler } from "express";
+import { resolveRequestHotelTenant } from "./hotelTenant.js";
 
 const flutterwaveBaseUrl = "https://api.flutterwave.com/v3";
 const supportedCurrencies = new Set(["USD", "UGX", "EUR", "GBP", "KES", "TZS", "RWF"]);
@@ -13,6 +14,7 @@ export class HotelBookingError extends Error {
 
 type HotelBooking = {
   id: string;
+  organization_id: string;
   confirmation_number: string;
   total_amount: number | string;
   currency_code: string;
@@ -169,6 +171,13 @@ const getBooking = async (bookingId: string) => {
   return rows[0];
 };
 
+const assertBookingTenant = async (request: Request, booking: HotelBooking) => {
+  const tenant = await resolveRequestHotelTenant(request);
+  if (booking.organization_id !== tenant.organizationId) {
+    throw new HotelBookingError("This reservation is not available for this hotel", 404);
+  }
+};
+
 const getAttempt = async (txRef: string) => {
   const rows = await readService<HotelPaymentAttempt[]>(`hotel_payment_attempts?tx_ref=eq.${encodeURIComponent(txRef)}&select=*`);
   if (!rows[0]) throw new HotelBookingError("Payment attempt was not found", 404);
@@ -190,6 +199,7 @@ const getReturnUrl = () => {
 
 const createBooking: RequestHandler = async (request, response) => {
   try {
+    const tenant = await resolveRequestHotelTenant(request);
     const body = request.body as {
       roomId?: string;
       guest?: Record<string, unknown>;
@@ -214,9 +224,12 @@ const createBooking: RequestHandler = async (request, response) => {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !Number.isInteger(body.guestCount) || !Number.isInteger(body.roomCount)) throw new HotelBookingError("Enter valid guest and room details");
     if (!Array.isArray(body.preferences) || body.preferences.some((value) => typeof value !== "string")) throw new HotelBookingError("Room preferences are invalid");
     const accessTokenHash = createHash("sha256").update(body.accessToken).digest("hex");
-    const bookingWithKey = (await readService<Array<{ user_id: string | null; access_token_hash: string; fx_rates_snapshot: { as_of?: string } | null }>>(
-      `hotel_bookings?idempotency_key=eq.${encodeURIComponent(body.idempotencyKey)}&select=user_id,access_token_hash,fx_rates_snapshot&limit=1`,
+    const bookingWithKey = (await readService<Array<{ organization_id: string; user_id: string | null; access_token_hash: string; fx_rates_snapshot: { as_of?: string } | null }>>(
+      `hotel_bookings?idempotency_key=eq.${encodeURIComponent(body.idempotencyKey)}&select=organization_id,user_id,access_token_hash,fx_rates_snapshot&limit=1`,
     ))[0];
+    if (bookingWithKey && bookingWithKey.organization_id !== tenant.organizationId) {
+      throw new HotelBookingError("Reservation belongs to a different hotel", 404);
+    }
     const existingBooking = bookingWithKey?.user_id === userId && bookingWithKey.access_token_hash === accessTokenHash
       ? bookingWithKey
       : null;
@@ -225,15 +238,16 @@ const createBooking: RequestHandler = async (request, response) => {
       const rateLimitAllowed = await callServiceRpc<boolean>("consume_hotel_booking_rate_limit", { target_rate_limit_key: rateLimitKey });
       if (!rateLimitAllowed) throw new HotelBookingError("Too many reservation attempts. Please try again later", 429);
       ratesSnapshot = await fetchAndStoreRates();
-      const selectedRoom = (await readService<Array<{ currency_code: string }>>(`hotel_rooms?id=eq.${encodeURIComponent(body.roomId)}&status=eq.published&select=currency_code`))[0];
+      const selectedRoom = (await readService<Array<{ currency_code: string }>>(`hotel_rooms?id=eq.${encodeURIComponent(body.roomId)}&organization_id=eq.${encodeURIComponent(tenant.organizationId)}&status=eq.published&select=currency_code`))[0];
       if (!selectedRoom) throw new HotelBookingError("This room is not available for booking", 404);
       const currency = selectedRoom.currency_code.trim().toUpperCase();
       if (!supportedCurrencies.has(currency) || !ratesSnapshot.rates[currency]) throw new HotelBookingError("This room uses an unsupported booking currency");
     }
 
     const rows = await callServiceRpc<Array<{ booking_id: string; confirmation_number: string; total_amount: number; currency_code: string; expires_at: string }>>(
-      "create_hotel_booking",
+      "create_hotel_booking_for_tenant",
       {
+        target_organization_id: tenant.organizationId,
         target_room_id: body.roomId,
         target_guest: {
           first_name: safeText(body.guest?.firstName, 100),
@@ -273,6 +287,7 @@ const createPaymentSession: RequestHandler = async (request, response) => {
     const { bookingId, accessToken } = request.body as { bookingId?: string; accessToken?: string };
     if (!bookingId || !accessToken) throw new HotelBookingError("Booking access is required");
     const booking = await getBooking(bookingId);
+    await assertBookingTenant(request, booking);
     const tokenHash = createHash("sha256").update(accessToken).digest("hex");
     if (tokenHash !== booking.access_token_hash) throw new HotelBookingError("Booking access could not be verified", 403);
     if (booking.payment_status === "paid") throw new HotelBookingError("This reservation is already paid", 409);
@@ -351,9 +366,12 @@ const verifyTransaction = async (transactionId: string) => {
   return payload.data;
 };
 
-const verifyHotelPayment = async (transactionId: string, txRef: string, accessToken?: string) => {
+const verifyHotelPayment = async (transactionId: string, txRef: string, accessToken?: string, tenantOrganizationId?: string) => {
   const attempt = await getAttempt(txRef);
   const booking = await getBooking(attempt.booking_id);
+  if (tenantOrganizationId && booking.organization_id !== tenantOrganizationId) {
+    throw new HotelBookingError("This reservation is not available for this hotel", 404);
+  }
   if (accessToken && createHash("sha256").update(accessToken).digest("hex") !== booking.access_token_hash) {
     throw new HotelBookingError("Booking access could not be verified", 403);
   }
@@ -385,6 +403,7 @@ export const recoverHotelBooking: RequestHandler = async (request, response) => 
       throw new HotelBookingError("Booking recovery details are invalid");
     }
     const booking = await getBooking(bookingId);
+    await assertBookingTenant(request, booking);
     if (createHash("sha256").update(accessToken).digest("hex") !== booking.access_token_hash) {
       throw new HotelBookingError("Booking access could not be verified", 403);
     }
@@ -413,7 +432,10 @@ export const cancelHotelBookingHold: RequestHandler = async (request, response) 
     if (!bookingId || !/^[0-9a-f-]{36}$/i.test(bookingId) || !accessToken || accessToken.length < 32 || accessToken.length > 256) {
       throw new HotelBookingError("Booking cancellation details are invalid");
     }
+    const booking = await getBooking(bookingId);
+    await assertBookingTenant(request, booking);
     const tokenHash = createHash("sha256").update(accessToken).digest("hex");
+    if (tokenHash !== booking.access_token_hash) throw new HotelBookingError("Booking access could not be verified", 403);
     const cancelled = await callServiceRpc<boolean>("cancel_hotel_booking_hold", {
       target_booking_id: bookingId,
       target_access_token_hash: tokenHash,
@@ -430,7 +452,8 @@ export const verifyHotelBookingPayment: RequestHandler = async (request, respons
   try {
     const { transactionId, txRef, accessToken } = request.body as { transactionId?: string | number; txRef?: string; accessToken?: string };
     if (!transactionId || !txRef?.startsWith("hotel-") || !accessToken) throw new HotelBookingError("Payment verification details are required");
-    const confirmation = await verifyHotelPayment(String(transactionId), txRef, accessToken);
+    const tenant = await resolveRequestHotelTenant(request);
+    const confirmation = await verifyHotelPayment(String(transactionId), txRef, accessToken, tenant.organizationId);
     response.json({ ...confirmation, paymentStatus: confirmation.payment_status });
   } catch (error) {
     response.status(error instanceof HotelBookingError ? error.status : 503).json({
@@ -447,6 +470,7 @@ export const cancelHotelBookingPayment: RequestHandler = async (request, respons
     }
     const attempt = await getAttempt(txRef);
     const booking = await getBooking(attempt.booking_id);
+    await assertBookingTenant(request, booking);
     if (createHash("sha256").update(accessToken).digest("hex") !== booking.access_token_hash) throw new HotelBookingError("Booking access could not be verified", 403);
     if (attempt.status !== "completed") {
       await writeService(`hotel_payment_attempts?tx_ref=eq.${encodeURIComponent(txRef)}`, "PATCH", {
